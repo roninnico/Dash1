@@ -15,6 +15,7 @@ jobs:
           mv AndroidManifest.xml app/src/main/
           mv Core.kt MainActivity.kt app/src/main/java/com/dash/radio/
           mv app-build.gradle.kts app/build.gradle.kts
+          mv dash.keystore app/dash.keystore
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
