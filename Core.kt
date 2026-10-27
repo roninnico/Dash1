@@ -8,9 +8,12 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
@@ -19,12 +22,22 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.service.notification.NotificationListenerService
+import android.view.KeyEvent
 import androidx.core.app.NotificationManagerCompat
 import kotlinx.coroutines.flow.MutableStateFlow
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlin.math.cos
+import kotlin.math.floor
+import kotlin.math.ln
+import kotlin.math.roundToInt
+import kotlin.math.tan
 
-// Vacío a propósito: permite controlar la música de otras apps.
+// Vacío a propósito: permite leer y controlar la música de otras apps.
 class NotifListener : NotificationListenerService()
 
+// ---------------------------------------------------------------- Estado y datos guardados
 object Store {
     private lateinit var ctx: Context
     private val sp get() = ctx.getSharedPreferences("dash", Context.MODE_PRIVATE)
@@ -34,6 +47,13 @@ object Store {
     val tripM = MutableStateFlow(0.0)
     val model = MutableStateFlow("Mi auto")
     val calib = MutableStateFlow(1.0)
+    val gpsAcc = MutableStateFlow(-1f)
+    val lastFix = MutableStateFlow(0L)
+    val lat = MutableStateFlow(Double.NaN)
+    val lon = MutableStateFlow(Double.NaN)
+    val bearing = MutableStateFlow(0f)
+    val mph = MutableStateFlow(false)
+    val themeIdx = MutableStateFlow(0)
 
     fun init(c: Context) {
         ctx = c.applicationContext
@@ -41,6 +61,8 @@ object Store {
         tripM.value = sp.getString("trip", "0")?.toDoubleOrNull() ?: 0.0
         model.value = sp.getString("model", "Mi auto") ?: "Mi auto"
         calib.value = sp.getString("calib", "1.0")?.toDoubleOrNull() ?: 1.0
+        mph.value = sp.getBoolean("mph", false)
+        themeIdx.value = sp.getInt("theme", 0)
     }
 
     fun addDistance(meters: Double) {
@@ -64,46 +86,266 @@ object Store {
             .putString("calib", calib.value.toString())
             .putString("total", totalM.value.toString()).apply()
     }
+
+    fun setMph(v: Boolean) {
+        mph.value = v
+        sp.edit().putBoolean("mph", v).apply()
+    }
+
+    fun setTheme(i: Int) {
+        themeIdx.value = i
+        sp.edit().putInt("theme", i).apply()
+    }
 }
 
-object Media {
-    data class Info(val title: String, val artist: String, val playing: Boolean)
+// ---------------------------------------------------------------- Música (cualquier reproductor)
+object MediaHub {
+    class Sess(val pkg: String, val label: String, val ctl: MediaController)
+
+    data class Now(
+        val pkg: String = "",
+        val label: String = "",
+        val title: String = "",
+        val artist: String = "",
+        val art: Bitmap? = null,
+        val playing: Boolean = false,
+        val durMs: Long = 0L,
+        val posMs: Long = 0L,
+        val posAt: Long = 0L,
+        val speed: Float = 1f
+    )
+
+    val sessions = MutableStateFlow<List<Sess>>(emptyList())
+    val picked = MutableStateFlow("")
+    val now = MutableStateFlow(Now())
+
+    private var started = false
+    private var appCtx: Context? = null
+    private var lastKey = ""
+    private var lastArt: Bitmap? = null
+    private val registered = ArrayList<Pair<MediaController, MediaController.Callback>>()
 
     fun hasAccess(c: Context): Boolean =
         NotificationManagerCompat.getEnabledListenerPackages(c).contains(c.packageName)
 
-    private fun ctl(c: Context): MediaController? {
-        if (!hasAccess(c)) return null
-        return try {
+    // Se llama desde la pantalla (hilo principal) hasta que el acceso a notificaciones esté activo.
+    fun ensure(c: Context) {
+        if (started || !hasAccess(c)) return
+        appCtx = c.applicationContext
+        try {
             val m = c.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
-            val list = m.getActiveSessions(ComponentName(c, NotifListener::class.java))
-            list.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
-                ?: list.firstOrNull()
+            val comp = ComponentName(c, NotifListener::class.java)
+            m.addOnActiveSessionsChangedListener({ list -> reload(list) }, comp)
+            reload(m.getActiveSessions(comp))
+            started = true
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun reload(list: List<MediaController>?) {
+        for ((c, cb) in registered) {
+            try { c.unregisterCallback(cb) } catch (e: Exception) { }
+        }
+        registered.clear()
+        val c = appCtx ?: return
+        val pm = c.packageManager
+        val out = ArrayList<Sess>()
+        for (k in list.orEmpty()) {
+            val cb = object : MediaController.Callback() {
+                override fun onMetadataChanged(metadata: MediaMetadata?) { refresh() }
+                override fun onPlaybackStateChanged(state: PlaybackState?) { refresh() }
+            }
+            try { k.registerCallback(cb) } catch (e: Exception) { }
+            registered.add(Pair(k, cb))
+            val label = try {
+                pm.getApplicationLabel(pm.getApplicationInfo(k.packageName, 0)).toString()
+            } catch (e: Exception) {
+                k.packageName
+            }
+            out.add(Sess(k.packageName, label, k))
+        }
+        sessions.value = out
+        refresh()
+    }
+
+    private fun chosen(): Sess? {
+        val l = sessions.value
+        val p = picked.value
+        if (p.isNotEmpty()) {
+            val m = l.firstOrNull { it.pkg == p }
+            if (m != null) return m
+        }
+        return l.firstOrNull { it.ctl.playbackState?.state == PlaybackState.STATE_PLAYING }
+            ?: l.firstOrNull { it.ctl.playbackState?.state == PlaybackState.STATE_PAUSED }
+            ?: l.firstOrNull()
+    }
+
+    fun pick(pkg: String) {
+        picked.value = pkg
+        lastKey = ""
+        refresh()
+    }
+
+    private fun refresh() {
+        val s = chosen()
+        if (s == null) {
+            now.value = Now()
+            lastKey = ""
+            lastArt = null
+            return
+        }
+        val md = s.ctl.metadata
+        val st = s.ctl.playbackState
+        val title = md?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: ""
+        val artist = md?.getString(MediaMetadata.METADATA_KEY_ARTIST)
+            ?: md?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) ?: ""
+        val key = s.pkg + "|" + title + "|" + artist
+        if (key != lastKey || lastArt == null) {
+            lastKey = key
+            val bmp = md?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                ?: md?.getBitmap(MediaMetadata.METADATA_KEY_ART)
+                ?: md?.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+            lastArt = if (bmp != null && bmp.width > 320 && bmp.width > 0)
+                Bitmap.createScaledBitmap(bmp, 320, 320 * bmp.height / bmp.width, true)
+            else bmp
+        }
+        now.value = Now(
+            pkg = s.pkg,
+            label = s.label,
+            title = title,
+            artist = artist,
+            art = lastArt,
+            playing = st?.state == PlaybackState.STATE_PLAYING,
+            durMs = md?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L,
+            posMs = st?.position ?: 0L,
+            posAt = st?.lastPositionUpdateTime ?: 0L,
+            speed = st?.playbackSpeed ?: 1f
+        )
+    }
+
+    private fun tc() = chosen()?.ctl?.transportControls
+
+    private fun key(c: Context, code: Int) {
+        val am = c.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
+        am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+    }
+
+    fun playPause(c: Context) {
+        val t = tc()
+        if (t == null) key(c, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+        else if (now.value.playing) t.pause() else t.play()
+    }
+
+    fun next(c: Context) {
+        val t = tc()
+        if (t == null) key(c, KeyEvent.KEYCODE_MEDIA_NEXT) else t.skipToNext()
+    }
+
+    fun prev(c: Context) {
+        val t = tc()
+        if (t == null) key(c, KeyEvent.KEYCODE_MEDIA_PREVIOUS) else t.skipToPrevious()
+    }
+
+    fun stop(c: Context) {
+        val t = tc()
+        if (t == null) key(c, KeyEvent.KEYCODE_MEDIA_STOP) else t.stop()
+    }
+
+    fun seek(ms: Long) {
+        tc()?.seekTo(ms)
+    }
+}
+
+// ---------------------------------------------------------------- Clima (Open-Meteo, sin clave)
+object Weather {
+    data class W(
+        val temp: Int, val feels: Int, val hum: Int, val wind: Int,
+        val code: Int, val hi: Int, val lo: Int
+    )
+
+    fun fetch(lat: Double, lon: Double): W? {
+        return try {
+            val u = "https://api.open-meteo.com/v1/forecast?latitude=" + lat + "&longitude=" + lon +
+                "&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code" +
+                "&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=1"
+            val cn = URL(u).openConnection() as HttpURLConnection
+            cn.connectTimeout = 8000
+            cn.readTimeout = 8000
+            val txt = cn.inputStream.bufferedReader().use { it.readText() }
+            val j = JSONObject(txt)
+            val c = j.getJSONObject("current")
+            val d = j.getJSONObject("daily")
+            W(
+                c.getDouble("temperature_2m").roundToInt(),
+                c.getDouble("apparent_temperature").roundToInt(),
+                c.getDouble("relative_humidity_2m").roundToInt(),
+                c.getDouble("wind_speed_10m").roundToInt(),
+                c.getInt("weather_code"),
+                d.getJSONArray("temperature_2m_max").getDouble(0).roundToInt(),
+                d.getJSONArray("temperature_2m_min").getDouble(0).roundToInt()
+            )
         } catch (e: Exception) {
             null
         }
     }
 
-    fun info(c: Context): Info? {
-        val k = ctl(c) ?: return null
-        val md = k.metadata
-        return Info(
-            md?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: "Sin título",
-            md?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: "",
-            k.playbackState?.state == PlaybackState.STATE_PLAYING
-        )
-    }
-
-    fun prev(c: Context) { ctl(c)?.transportControls?.skipToPrevious() }
-    fun next(c: Context) { ctl(c)?.transportControls?.skipToNext() }
-    fun toggle(c: Context) {
-        val k = ctl(c) ?: return
-        if (k.playbackState?.state == PlaybackState.STATE_PLAYING) k.transportControls.pause()
-        else k.transportControls.play()
+    fun describe(code: Int): Pair<String, String> = when (code) {
+        0 -> Pair("Despejado", "☀")
+        1, 2 -> Pair("Poco nublado", "☀")
+        3 -> Pair("Nublado", "☁")
+        45, 48 -> Pair("Niebla", "≋")
+        in 51..67, in 80..82 -> Pair("Lluvia", "☂")
+        in 71..77, 85, 86 -> Pair("Nieve", "❄")
+        in 95..99 -> Pair("Tormenta", "⚡")
+        else -> Pair("Variable", "☁")
     }
 }
 
-// Corre en segundo plano (con la pantalla apagada) midiendo velocidad y distancia por GPS.
+// ---------------------------------------------------------------- Mapa (teselas de OpenStreetMap)
+object MapTiles {
+    const val Z = 16
+    private const val N = 65536.0 // 2^16
+
+    class Sheet(val bmp: Bitmap, val tx: Int, val ty: Int)
+
+    fun worldX(lon: Double): Double = (lon + 180.0) / 360.0 * N
+
+    fun worldY(lat: Double): Double {
+        val r = Math.toRadians(lat)
+        return (1.0 - ln(tan(r) + 1.0 / cos(r)) / Math.PI) / 2.0 * N
+    }
+
+    // Une 3x3 teselas alrededor de la posición. Se vuelve a llamar solo al cambiar de tesela central.
+    fun load(lat: Double, lon: Double): Sheet? {
+        val tx = floor(worldX(lon)).toInt()
+        val ty = floor(worldY(lat)).toInt()
+        val out = Bitmap.createBitmap(768, 768, Bitmap.Config.ARGB_8888)
+        val cv = android.graphics.Canvas(out)
+        var ok = false
+        for (dx in -1..1) {
+            for (dy in -1..1) {
+                try {
+                    val cn = URL("https://tile.openstreetmap.org/" + Z + "/" + (tx + dx) + "/" + (ty + dy) + ".png")
+                        .openConnection() as HttpURLConnection
+                    cn.setRequestProperty("User-Agent", "DashRadio/1.0 (launcher personal para auto)")
+                    cn.connectTimeout = 8000
+                    cn.readTimeout = 8000
+                    val b = BitmapFactory.decodeStream(cn.inputStream)
+                    if (b != null) {
+                        cv.drawBitmap(b, ((dx + 1) * 256).toFloat(), ((dy + 1) * 256).toFloat(), null)
+                        b.recycle()
+                        ok = true
+                    }
+                } catch (e: Exception) {
+                }
+            }
+        }
+        return if (ok) Sheet(out, tx, ty) else null
+    }
+}
+
+// ---------------------------------------------------------------- GPS en segundo plano
 class TripService : Service(), LocationListener {
     private var last: Location? = null
 
@@ -139,11 +381,22 @@ class TripService : Service(), LocationListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onLocationChanged(l: Location) {
-        val kmh = if (l.hasSpeed()) l.speed * 3.6f else 0f
+        Store.gpsAcc.value = l.accuracy
+        Store.lastFix.value = System.currentTimeMillis()
+        Store.lat.value = l.latitude
+        Store.lon.value = l.longitude
+        val p = last
+        var ms = if (l.hasSpeed()) l.speed else -1f
+        if (ms < 0f && p != null) {
+            val dt = (l.time - p.time) / 1000f
+            ms = if (dt > 0f) p.distanceTo(l) / dt else 0f
+        }
+        if (ms < 0f) ms = 0f
+        val kmh = ms * 3.6f
         Store.speed.value = if (kmh < 2f) 0f else kmh
+        if (l.hasBearing() && ms > 1.5f) Store.bearing.value = l.bearing
         if (l.accuracy < 30f) {
-            val p = last
-            if (p != null && l.speed > 1.5f) {
+            if (p != null && ms > 1.5f) {
                 val d = p.distanceTo(l)
                 if (d < 200f) Store.addDistance(d.toDouble())
             }
