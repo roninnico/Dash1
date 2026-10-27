@@ -54,6 +54,12 @@ object Store {
     val bearing = MutableStateFlow(0f)
     val mph = MutableStateFlow(false)
     val themeIdx = MutableStateFlow(0)
+    val mode = MutableStateFlow(0)            // 0 = oscuro, 1 = AMOLED, 2 = claro
+    val userName = MutableStateFlow("Nico")
+    val voice = MutableStateFlow(true)
+    val greetText = MutableStateFlow("")
+    val greetTick = MutableStateFlow(0L)
+    val greetAt = MutableStateFlow(0L)
 
     fun init(c: Context) {
         ctx = c.applicationContext
@@ -63,6 +69,9 @@ object Store {
         calib.value = sp.getString("calib", "1.0")?.toDoubleOrNull() ?: 1.0
         mph.value = sp.getBoolean("mph", false)
         themeIdx.value = sp.getInt("theme", 0)
+        mode.value = sp.getInt("mode", 0)
+        userName.value = sp.getString("name", "Nico") ?: "Nico"
+        voice.value = sp.getBoolean("voice", true)
     }
 
     fun addDistance(meters: Double) {
@@ -95,6 +104,21 @@ object Store {
     fun setTheme(i: Int) {
         themeIdx.value = i
         sp.edit().putInt("theme", i).apply()
+    }
+
+    fun setMode(i: Int) {
+        mode.value = i
+        sp.edit().putInt("mode", i).apply()
+    }
+
+    fun setName(n: String) {
+        userName.value = n.trim()
+        sp.edit().putString("name", n.trim()).apply()
+    }
+
+    fun setVoice(v: Boolean) {
+        voice.value = v
+        sp.edit().putBoolean("voice", v).apply()
     }
 }
 

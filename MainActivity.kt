@@ -1,8 +1,10 @@
 package com.dash.radio
 
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationManager
@@ -11,6 +13,7 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.provider.AlarmClock
 import android.provider.Settings
+import android.speech.tts.TextToSpeech
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -22,6 +25,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -30,10 +35,13 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.CutCornerShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -42,10 +50,12 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -60,6 +70,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.cos
@@ -70,38 +81,94 @@ import kotlin.math.sin
 
 // ============================================================ Temas
 class Theme(
+    val name: String,
     val bg: Color, val card: Color, val accent: Color, val accent2: Color, val hot: Color,
-    val text: Color, val dim: Color, val map: FloatArray
+    val text: Color, val dim: Color, val map: FloatArray,
+    val corner: Int = 0, val bw: Float = 1f,
+    val light: Boolean = false, val onAccent: Color = Color.Black
 )
 
-// Cyberpunk 2077: amarillo ácido + cian + magenta sobre negro
+// Matriz para oscurecer/invertir el mapa y teñirlo con el color del tema
+fun tint(r: Float, g: Float, b: Float) = floatArrayOf(
+    -r, 0f, 0f, 0f, 255f * r,
+    0f, -g, 0f, 0f, 255f * g,
+    0f, 0f, -b, 0f, 255f * b,
+    0f, 0f, 0f, 1f, 0f
+)
+
 val Cyber = Theme(
-    bg = Color(0xFF04050A), card = Color(0xFF0D0F17),
-    accent = Color(0xFFFCEE0A), accent2 = Color(0xFF00F0FF), hot = Color(0xFFFF2A6D),
-    text = Color(0xFFF2F2F2), dim = Color(0xFF8A8F9C),
-    map = floatArrayOf(
-        -0.45f, 0f, 0f, 0f, 114.75f,
-        0f, -0.8f, 0f, 0f, 204f,
-        0f, 0f, -1f, 0f, 255f,
-        0f, 0f, 0f, 1f, 0f
-    )
+    "Cyberpunk", Color(0xFF04050A), Color(0xFF0D0F17),
+    Color(0xFFFCEE0A), Color(0xFF00F0FF), Color(0xFFFF2A6D),
+    Color(0xFFF2F2F2), Color(0xFF8A8F9C), tint(0.45f, 0.8f, 1f), corner = 0, bw = 1f
+)
+val Nerv = Theme(
+    "Evangelion", Color(0xFF050308), Color(0xFF110A1A),
+    Color(0xFFFF7A00), Color(0xFF8CFF2E), Color(0xFFFF2D2D),
+    Color(0xFFF4EEFF), Color(0xFF8D7FA3), tint(0.7f, 0.35f, 0.9f), corner = 1, bw = 1.2f
+)
+val Naruto = Theme(
+    "Naruto", Color(0xFF0A0D16), Color(0xFF121826),
+    Color(0xFFFF7A1A), Color(0xFF35A7FF), Color(0xFFE5322D),
+    Color(0xFFF5F1EA), Color(0xFF8B93A7), tint(0.8f, 0.45f, 0.25f), corner = 2, bw = 1.5f
+)
+val DragonBall = Theme(
+    "Dragon Ball", Color(0xFF070A16), Color(0xFF0F1530),
+    Color(0xFFFF8A00), Color(0xFFFFE04A), Color(0xFFFF3B1F),
+    Color(0xFFFFF7E6), Color(0xFF9AA0B8), tint(0.9f, 0.6f, 0.2f), corner = 2, bw = 2f
+)
+val Street = Theme(
+    "Street Fighter", Color(0xFF0B0709), Color(0xFF1A0E12),
+    Color(0xFFE4002B), Color(0xFFFFD400), Color(0xFFFF6A1F),
+    Color(0xFFFFF4F4), Color(0xFFA08888), tint(0.9f, 0.25f, 0.25f), corner = 3, bw = 2f
+)
+val Turbo = Theme(
+    "Turbo", Color(0xFF08090A), Color(0xFF121416),
+    Color(0xFFC6FF00), Color(0xFFFFFFFF), Color(0xFFFF3D00),
+    Color(0xFFEDEFF2), Color(0xFF7D838C), tint(0.55f, 0.85f, 0.2f), corner = 4, bw = 1.5f
+)
+val Static = Theme(
+    "Static", Color(0xFF04060F), Color(0xFF0B1022),
+    Color(0xFF33A8FF), Color(0xFFFFE600), Color(0xFFB057FF),
+    Color(0xFFEAF4FF), Color(0xFF7C8AA6), tint(0.3f, 0.6f, 1f), corner = 5, bw = 1.5f
 )
 
-// Neon Genesis Evangelion: naranja NERV + verde neón + rojo alerta sobre púrpura oscuro
-val Nerv = Theme(
-    bg = Color(0xFF050308), card = Color(0xFF110A1A),
-    accent = Color(0xFFFF7A00), accent2 = Color(0xFF8CFF2E), hot = Color(0xFFFF2D2D),
-    text = Color(0xFFF4EEFF), dim = Color(0xFF8D7FA3),
-    map = floatArrayOf(
-        -0.7f, 0f, 0f, 0f, 178.5f,
-        0f, -0.35f, 0f, 0f, 89.25f,
-        0f, 0f, -0.9f, 0f, 229.5f,
-        0f, 0f, 0f, 1f, 0f
+val Themes = listOf(Cyber, Nerv, Naruto, DragonBall, Street, Turbo, Static)
+
+// modo: 0 = oscuro (el del tema), 1 = AMOLED (negro puro), 2 = claro
+fun Theme.withMode(mode: Int): Theme = when (mode) {
+    1 -> Theme(
+        name, Color.Black, Color(0xFF07070B), accent, accent2, hot, text, dim, map,
+        corner, bw, false, Color.Black
     )
-)
+    2 -> Theme(
+        name, Color(0xFFE9EBF0), Color.White,
+        lerp(accent, Color.Black, 0.45f), lerp(accent2, Color.Black, 0.5f), lerp(hot, Color.Black, 0.25f),
+        Color(0xFF14151A), Color(0xFF5B6070), map, corner, bw, true, Color.White
+    )
+    else -> this
+}
+
+fun themeShape(t: Theme, small: Boolean = false): Shape {
+    val k = if (small) 0.5f else 1f
+    return when (t.corner) {
+        1 -> CutCornerShape((10 * k).dp)
+        2 -> RoundedCornerShape((18 * k).dp)
+        3 -> CutCornerShape(topStart = 0.dp, topEnd = (16 * k).dp, bottomEnd = 0.dp, bottomStart = (16 * k).dp)
+        4 -> CutCornerShape(topStart = (28 * k).dp, topEnd = 0.dp, bottomEnd = (28 * k).dp, bottomStart = 0.dp)
+        5 -> RoundedCornerShape((6 * k).dp)
+        else -> CutCornerShape(topStart = (16 * k).dp, topEnd = 0.dp, bottomEnd = (16 * k).dp, bottomStart = 0.dp)
+    }
+}
 
 val LocalTheme = compositionLocalOf { Cyber }
 val Mono = FontFamily.Monospace
+
+fun greeting(name: String): String {
+    val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+    val s = if (h < 12) "Buenos días" else if (h < 19) "Buenas tardes" else "Buenas noches"
+    val n = name.trim()
+    return (if (n.isEmpty()) s else s + ", " + n) + ". ¿Listos para un nuevo viaje?"
+}
 
 // ============================================================ Actividad
 class MainActivity : ComponentActivity() {
@@ -109,18 +176,29 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { startTrip() }
 
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var pendingSpeech: String? = null
+
+    private val screenOn = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, i: Intent?) { greet() }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Store.init(this)
         setContent {
             val idx by Store.themeIdx.collectAsState()
-            val theme = if (idx == 1) Nerv else Cyber
+            val mode by Store.mode.collectAsState()
+            val theme = remember(idx, mode) { Themes[idx.coerceIn(0, Themes.size - 1)].withMode(mode) }
             CompositionLocalProvider(LocalTheme provides theme) {
                 MaterialTheme(
-                    colorScheme = darkColorScheme(
-                        primary = theme.accent, onPrimary = Color.Black,
-                        secondary = theme.accent2, background = theme.bg,
-                        surface = theme.card, onSurface = theme.text
+                    colorScheme = if (theme.light) lightColorScheme(
+                        primary = theme.accent, onPrimary = Color.White, secondary = theme.accent2,
+                        background = theme.bg, surface = theme.card, onSurface = theme.text
+                    ) else darkColorScheme(
+                        primary = theme.accent, onPrimary = Color.Black, secondary = theme.accent2,
+                        background = theme.bg, surface = theme.card, onSurface = theme.text
                     )
                 ) {
                     var screen by remember { mutableStateOf(0) }
@@ -135,6 +213,8 @@ class MainActivity : ComponentActivity() {
         val need = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
         if (Build.VERSION.SDK_INT >= 33) need.add(Manifest.permission.POST_NOTIFICATIONS)
         perm.launch(need.toTypedArray())
+        registerReceiver(screenOn, IntentFilter(Intent.ACTION_SCREEN_ON))
+        greet()
     }
 
     override fun onResume() {
@@ -142,10 +222,47 @@ class MainActivity : ComponentActivity() {
         startTrip()
     }
 
+    override fun onDestroy() {
+        try { unregisterReceiver(screenOn) } catch (e: Exception) { }
+        tts?.shutdown()
+        super.onDestroy()
+    }
+
     private fun startTrip() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
             == PackageManager.PERMISSION_GRANTED
         ) ContextCompat.startForegroundService(this, Intent(this, TripService::class.java))
+    }
+
+    // Saluda al abrir la app y al encender la pantalla (máximo una vez cada 20 minutos)
+    private fun greet() {
+        val now = System.currentTimeMillis()
+        if (Store.greetAt.value != 0L && now - Store.greetAt.value < 20 * 60 * 1000L) return
+        Store.greetAt.value = now
+        val msg = greeting(Store.userName.value)
+        Store.greetText.value = msg
+        Store.greetTick.value = now
+        if (Store.voice.value) speak(msg)
+    }
+
+    private fun speak(text: String) {
+        val engine = tts
+        if (engine == null) {
+            pendingSpeech = text
+            tts = TextToSpeech(this) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    tts?.setLanguage(Locale("es"))
+                    ttsReady = true
+                    val p = pendingSpeech
+                    pendingSpeech = null
+                    if (p != null) tts?.speak(p, TextToSpeech.QUEUE_FLUSH, null, "greet")
+                }
+            }
+        } else if (ttsReady) {
+            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "greet")
+        } else {
+            pendingSpeech = text
+        }
     }
 }
 
@@ -213,10 +330,10 @@ fun NeonCard(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val t = LocalTheme.current
-    val shape = CutCornerShape(topStart = 16.dp, bottomEnd = 16.dp)
+    val shape = themeShape(t)
     Column(
         modifier.clip(shape).background(t.card, shape)
-            .border(1.dp, t.accent.copy(alpha = 0.55f), shape).padding(pad)
+            .border(t.bw.dp, t.accent.copy(alpha = 0.6f), shape).padding(pad)
     ) {
         if (tag != null) Tag(tag)
         content()
@@ -232,10 +349,10 @@ fun Tag(text: String) {
 @Composable
 fun NeonButton(text: String, modifier: Modifier, onClick: () -> Unit) {
     val t = LocalTheme.current
-    val shape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp)
+    val shape = themeShape(t, small = true)
     Box(
         modifier.height(46.dp).clip(shape).background(t.card, shape)
-            .border(1.dp, t.accent, shape).clickable(onClick = onClick),
+            .border(t.bw.dp, t.accent, shape).clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -248,7 +365,7 @@ fun NeonButton(text: String, modifier: Modifier, onClick: () -> Unit) {
 @Composable
 fun Chip(text: String, selected: Boolean, onClick: () -> Unit) {
     val t = LocalTheme.current
-    val shape = CutCornerShape(topStart = 6.dp, bottomEnd = 6.dp)
+    val shape = themeShape(t, small = true)
     Box(
         Modifier.clip(shape)
             .background(if (selected) t.accent else Color.Transparent, shape)
@@ -258,7 +375,7 @@ fun Chip(text: String, selected: Boolean, onClick: () -> Unit) {
     ) {
         Text(
             text.uppercase(), fontSize = 12.sp, fontFamily = Mono, maxLines = 1,
-            color = if (selected) Color.Black else t.accent
+            color = if (selected) t.onAccent else t.accent
         )
     }
 }
@@ -300,7 +417,7 @@ fun Glyph(kind: Int, color: Color, modifier: Modifier = Modifier) {
 @Composable
 fun CtlBtn(kind: Int, big: Boolean, onClick: () -> Unit) {
     val t = LocalTheme.current
-    val s = if (big) 54.dp else 44.dp
+    val s = if (big) 50.dp else 40.dp
     Box(
         Modifier.size(s).clip(CircleShape)
             .border(if (big) 2.dp else 1.dp, if (big) t.accent2 else t.accent.copy(alpha = 0.6f), CircleShape)
@@ -311,52 +428,129 @@ fun CtlBtn(kind: Int, big: Boolean, onClick: () -> Unit) {
     }
 }
 
+// Barra de progreso compacta: toca o arrastra para saltar a otro punto de la canción
+@Composable
+fun SeekBar(frac: Float, enabled: Boolean, modifier: Modifier, onSeek: (Float) -> Unit) {
+    val t = LocalTheme.current
+    var drag by remember { mutableStateOf<Float?>(null) }
+    val f = drag ?: frac
+    val seek by rememberUpdatedState(onSeek)
+    Canvas(
+        modifier.height(22.dp)
+            .pointerInput(enabled) {
+                if (enabled) {
+                    detectTapGestures { o -> seek((o.x / size.width).coerceIn(0f, 1f)) }
+                }
+            }
+            .pointerInput(enabled) {
+                if (enabled) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { o -> drag = (o.x / size.width).coerceIn(0f, 1f) },
+                        onDragEnd = {
+                            val d = drag
+                            if (d != null) seek(d)
+                            drag = null
+                        },
+                        onDragCancel = { drag = null },
+                        onHorizontalDrag = { change, _ ->
+                            drag = (change.position.x / size.width).coerceIn(0f, 1f)
+                        }
+                    )
+                }
+            }
+    ) {
+        val cy = size.height / 2f
+        val w = 3.dp.toPx()
+        drawLine(t.dim.copy(alpha = 0.35f), Offset(0f, cy), Offset(size.width, cy), strokeWidth = w)
+        drawLine(t.accent, Offset(0f, cy), Offset(size.width * f, cy), strokeWidth = w)
+        drawCircle(t.accent, 5.dp.toPx(), Offset(size.width * f, cy))
+    }
+}
+
 // ============================================================ Pantalla principal
 @Composable
 fun Dash(onApps: () -> Unit, onSettings: () -> Unit) {
     val t = LocalTheme.current
     val total by Store.totalM.collectAsState()
     val trip by Store.tripM.collectAsState()
-    Row(
-        Modifier.fillMaxSize().background(t.bg).padding(12.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        GaugeCard(Modifier.weight(1f).fillMaxHeight())
-        Column(
-            Modifier.weight(1.25f).fillMaxHeight(),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+    Box(Modifier.fillMaxSize().background(t.bg)) {
+        Row(
+            Modifier.fillMaxSize().padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            MapCard(Modifier.weight(1f).fillMaxWidth())
-            MusicCard(Modifier.weight(1.2f).fillMaxWidth())
+            GaugeCard(Modifier.weight(1f).fillMaxHeight())
+            Column(
+                Modifier.weight(1.25f).fillMaxHeight(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                MapCard(Modifier.weight(1f).fillMaxWidth())
+                MusicCard(Modifier.weight(1.25f).fillMaxWidth())
+            }
+            Column(
+                Modifier.weight(0.9f).fillMaxHeight(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                TimeWeatherCard(Modifier.fillMaxWidth().weight(1f))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Stat("TOTAL", total, 0, Modifier.weight(1f))
+                    Stat("VIAJE", trip, 1, Modifier.weight(1f))
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    NeonButton("APPS", Modifier.weight(1f), onApps)
+                    NeonButton("⚙", Modifier.width(56.dp), onSettings)
+                }
+            }
         }
-        Column(
-            Modifier.weight(0.9f).fillMaxHeight(),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+        GreetBanner(Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
+    }
+}
+
+@Composable
+fun GreetBanner(modifier: Modifier) {
+    val t = LocalTheme.current
+    val text by Store.greetText.collectAsState()
+    val tick by Store.greetTick.collectAsState()
+    var show by remember { mutableStateOf(false) }
+    LaunchedEffect(tick) {
+        if (tick != 0L) {
+            show = true
+            delay(7000)
+            show = false
+        }
+    }
+    val a by animateFloatAsState(targetValue = if (show) 1f else 0f, animationSpec = tween(600))
+    if (a > 0.01f && text.isNotEmpty()) {
+        val shape = themeShape(t)
+        Box(
+            modifier.alpha(a).widthIn(max = 560.dp).clip(shape).background(t.card, shape)
+                .border((t.bw + 1f).dp, t.accent, shape)
+                .clickable { show = false }
+                .padding(horizontal = 26.dp, vertical = 14.dp)
         ) {
-            TimeCard(Modifier.fillMaxWidth())
-            WeatherCard(Modifier.fillMaxWidth().weight(1f))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Stat("TOTAL", total, Modifier.weight(1f))
-                Stat("VIAJE", trip, Modifier.weight(1f))
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                NeonButton("APPS", Modifier.weight(1f), onApps)
-                NeonButton("⚙", Modifier.width(56.dp), onSettings)
-            }
+            Text(
+                text, fontSize = 20.sp, color = t.accent2, fontFamily = Mono,
+                fontWeight = FontWeight.Bold, textAlign = TextAlign.Center
+            )
         }
     }
 }
 
 @Composable
-fun Stat(label: String, meters: Double, modifier: Modifier) {
+fun Stat(label: String, meters: Double, decimals: Int, modifier: Modifier) {
     val t = LocalTheme.current
     NeonCard(modifier, pad = 10.dp) {
         Tag(label)
-        Text(
-            String.format(Locale.US, "%.1f", meters / 1000), fontSize = 20.sp, color = t.text,
-            fontFamily = Mono, fontWeight = FontWeight.Bold, maxLines = 1
-        )
-        Text("KM", fontSize = 11.sp, color = t.accent2, fontFamily = Mono)
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(
+                String.format(Locale.US, "%." + decimals + "f", meters / 1000), fontSize = 20.sp,
+                color = t.text, fontFamily = Mono, fontWeight = FontWeight.Bold, maxLines = 1
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                "km", fontSize = 11.sp, color = t.accent2, fontFamily = Mono,
+                modifier = Modifier.padding(bottom = 3.dp)
+            )
+        }
     }
 }
 
@@ -436,7 +630,7 @@ fun Gauge(kmh: Float, mph: Boolean, modifier: Modifier, onToggle: () -> Unit) {
                 val r2 = r - stroke * (if (i % 5 == 0) 2.4f else 1.7f)
                 drawLine(
                     t.dim, Offset(c.x + cs * r1, c.y + sn * r1),
-                    Offset(c.x + cs * r2, c.y + sn * r2), strokeWidth = 2f
+                    Offset(c.x + cs * r2, c.y + sn * r2), strokeWidth = 1.5.dp.toPx()
                 )
             }
         }
@@ -497,16 +691,17 @@ fun MapCard(modifier: Modifier) {
     }
 
     val img = remember(sheet) { sheet?.bmp?.asImageBitmap() }
-    val filter = remember(t) { ColorFilter.colorMatrix(ColorMatrix(t.map)) }
-    val shape = CutCornerShape(topStart = 16.dp, bottomEnd = 16.dp)
+    val filter = remember(t) { if (t.light) null else ColorFilter.colorMatrix(ColorMatrix(t.map)) }
+    val shape = themeShape(t)
     Box(
         modifier
             .clickable { if (navApps.isNotEmpty()) launchPkg(ctx, navApps[0].first) }
             .clip(shape).background(t.card, shape)
-            .border(1.dp, t.accent.copy(alpha = 0.55f), shape)
+            .border(t.bw.dp, t.accent.copy(alpha = 0.6f), shape)
     ) {
         Canvas(Modifier.fillMaxSize()) {
             val c = center
+            val u = 1.dp.toPx()
             val s = sheet
             if (img != null && s != null && !lat.isNaN()) {
                 val px = ((MapTiles.worldX(lon) - (s.tx - 1)) * 256.0).toFloat()
@@ -516,22 +711,22 @@ fun MapCard(modifier: Modifier) {
                 var x = 0f
                 while (x < size.width) {
                     drawLine(t.dim.copy(alpha = 0.18f), Offset(x, 0f), Offset(x, size.height), 1f)
-                    x += 40f
+                    x += 40f * u
                 }
                 var y = 0f
                 while (y < size.height) {
                     drawLine(t.dim.copy(alpha = 0.18f), Offset(0f, y), Offset(size.width, y), 1f)
-                    y += 40f
+                    y += 40f * u
                 }
             }
             if (!lat.isNaN()) {
                 val p = Path().apply {
-                    moveTo(c.x, c.y - 24f); lineTo(c.x + 15f, c.y + 18f)
-                    lineTo(c.x, c.y + 9f); lineTo(c.x - 15f, c.y + 18f); close()
+                    moveTo(c.x, c.y - 18f * u); lineTo(c.x + 11f * u, c.y + 13f * u)
+                    lineTo(c.x, c.y + 7f * u); lineTo(c.x - 11f * u, c.y + 13f * u); close()
                 }
                 rotate(degrees = brg, pivot = c) {
                     drawPath(p, t.accent)
-                    drawPath(p, Color.Black, style = Stroke(width = 2f))
+                    drawPath(p, Color.Black, style = Stroke(width = 1.5f * u))
                 }
             }
         }
@@ -569,7 +764,6 @@ fun MusicCard(modifier: Modifier) {
     val picked by MediaHub.picked.collectAsState()
     var access by remember { mutableStateOf(MediaHub.hasAccess(ctx)) }
     var tick by remember { mutableStateOf(0L) }
-    var drag by remember { mutableStateOf<Float?>(null) }
     val installed = remember { knownMusic.filter { ctx.packageManager.getLaunchIntentForPackage(it.first) != null }.take(4) }
 
     LaunchedEffect(Unit) {
@@ -589,77 +783,74 @@ fun MusicCard(modifier: Modifier) {
     val artImg: ImageBitmap? = remember(now.art) { now.art?.asImageBitmap() }
 
     NeonCard(modifier, tag = "REPRODUCTOR", pad = 12.dp) {
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            if (sessions.isNotEmpty()) {
-                Chip("Auto", picked.isEmpty()) { MediaHub.pick("") }
-                for (s in sessions) Chip(s.label, picked == s.pkg) { MediaHub.pick(s.pkg) }
-            } else {
-                for ((pkg, name) in installed) Chip(name, false) { launchPkg(ctx, pkg) }
-            }
-        }
-        if (!access) {
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Activa Dash en «Acceso a notificaciones» para controlar la música.",
-                fontSize = 13.sp, color = t.dim
-            )
-            Spacer(Modifier.height(8.dp))
-            NeonButton("ACTIVAR ACCESO", Modifier.fillMaxWidth()) {
-                try { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } catch (e: Exception) { }
-            }
-        } else {
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    Modifier.size(62.dp).clip(CircleShape).background(t.bg)
-                        .border(2.dp, t.accent, CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (artImg != null) {
-                        Image(artImg, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                    } else {
-                        Text("♪", fontSize = 26.sp, color = t.accent)
+        BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
+            val compact = maxHeight < 165.dp
+            Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceEvenly) {
+                if (!compact) {
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (sessions.isNotEmpty()) {
+                            Chip("Auto", picked.isEmpty()) { MediaHub.pick("") }
+                            for (s in sessions) Chip(s.label, picked == s.pkg) { MediaHub.pick(s.pkg) }
+                        } else {
+                            for ((pkg, name) in installed) Chip(name, false) { launchPkg(ctx, pkg) }
+                        }
                     }
                 }
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f).clickable { if (now.pkg.isNotEmpty()) launchPkg(ctx, now.pkg) }) {
+                if (!access) {
                     Text(
-                        if (now.title.isBlank()) "Sin reproducción" else now.title,
-                        fontSize = 18.sp, color = t.text, fontWeight = FontWeight.Bold, maxLines = 1
+                        "Activa Dash en «Acceso a notificaciones» para controlar la música.",
+                        fontSize = 13.sp, color = t.dim
                     )
-                    Text(now.artist, fontSize = 14.sp, color = t.accent2, maxLines = 1)
+                    NeonButton("ACTIVAR ACCESO", Modifier.fillMaxWidth()) {
+                        try { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } catch (e: Exception) { }
+                    }
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier.size(if (compact) 44.dp else 54.dp).clip(CircleShape).background(t.bg)
+                                .border(2.dp, t.accent, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (artImg != null) {
+                                Image(artImg, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                            } else {
+                                Text("♪", fontSize = 22.sp, color = t.accent)
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f).clickable { if (now.pkg.isNotEmpty()) launchPkg(ctx, now.pkg) }) {
+                            Text(
+                                if (now.title.isBlank()) "Sin reproducción" else now.title,
+                                fontSize = 17.sp, color = t.text, fontWeight = FontWeight.Bold, maxLines = 1
+                            )
+                            Text(now.artist, fontSize = 13.sp, color = t.accent2, maxLines = 1)
+                        }
+                    }
+                    Column {
+                        SeekBar(frac, dur > 0L, Modifier.fillMaxWidth()) { f ->
+                            if (dur > 0L) MediaHub.seek((f * dur).toLong())
+                        }
+                        if (!compact) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(fmt(pos), fontSize = 11.sp, color = t.dim, fontFamily = Mono)
+                                Text(fmt(dur), fontSize = 11.sp, color = t.dim, fontFamily = Mono)
+                            }
+                        }
+                    }
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CtlBtn(4, false) { MediaHub.prev(ctx) }
+                        CtlBtn(if (now.playing) 1 else 0, true) { MediaHub.playPause(ctx) }
+                        CtlBtn(2, false) { MediaHub.stop(ctx) }
+                        CtlBtn(3, false) { MediaHub.next(ctx) }
+                    }
                 }
-            }
-            Slider(
-                value = drag ?: frac,
-                onValueChange = { drag = it },
-                onValueChangeFinished = {
-                    val d = drag
-                    if (d != null && dur > 0L) MediaHub.seek((d * dur).toLong())
-                    drag = null
-                },
-                enabled = dur > 0L,
-                colors = SliderDefaults.colors(
-                    thumbColor = t.accent, activeTrackColor = t.accent,
-                    inactiveTrackColor = t.dim.copy(alpha = 0.3f)
-                )
-            )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(fmt(pos), fontSize = 11.sp, color = t.dim, fontFamily = Mono)
-                Text(fmt(dur), fontSize = 11.sp, color = t.dim, fontFamily = Mono)
-            }
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                CtlBtn(4, false) { MediaHub.prev(ctx) }
-                CtlBtn(if (now.playing) 1 else 0, true) { MediaHub.playPause(ctx) }
-                CtlBtn(2, false) { MediaHub.stop(ctx) }
-                CtlBtn(3, false) { MediaHub.next(ctx) }
             }
         }
     }
@@ -667,10 +858,11 @@ fun MusicCard(modifier: Modifier) {
 
 // ------------------------------------------------------------ Hora y clima
 @Composable
-fun TimeCard(modifier: Modifier) {
+fun TimeWeatherCard(modifier: Modifier) {
     val t = LocalTheme.current
     val ctx = LocalContext.current
     var now by remember { mutableStateOf(Date()) }
+    var w by remember { mutableStateOf<Weather.W?>(null) }
     val f1 = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
     val f2 = remember { SimpleDateFormat("EEE d MMM", Locale.getDefault()) }
     LaunchedEffect(Unit) {
@@ -679,20 +871,6 @@ fun TimeCard(modifier: Modifier) {
             delay(1000)
         }
     }
-    NeonCard(modifier.clickable { openClock(ctx) }, tag = "HORA", pad = 12.dp) {
-        Text(
-            f1.format(now), fontSize = 44.sp, color = t.accent2, fontFamily = Mono,
-            fontWeight = FontWeight.Bold
-        )
-        Text(f2.format(now).uppercase(), fontSize = 13.sp, color = t.dim, fontFamily = Mono)
-    }
-}
-
-@Composable
-fun WeatherCard(modifier: Modifier) {
-    val t = LocalTheme.current
-    val ctx = LocalContext.current
-    var w by remember { mutableStateOf<Weather.W?>(null) }
     LaunchedEffect(Unit) {
         while (true) {
             var la = Store.lat.value
@@ -712,25 +890,41 @@ fun WeatherCard(modifier: Modifier) {
             delay(15000)
         }
     }
-    NeonCard(modifier, tag = "CLIMA", pad = 12.dp) {
+    NeonCard(modifier, tag = "HORA · CLIMA", pad = 10.dp) {
         val x = w
+        Row(
+            Modifier.fillMaxWidth().clickable { openClock(ctx) },
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(
+                    f1.format(now), fontSize = 34.sp, color = t.accent2, fontFamily = Mono,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(f2.format(now).uppercase(), fontSize = 12.sp, color = t.dim, fontFamily = Mono)
+            }
+            if (x != null) {
+                val d = Weather.describe(x.code)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(d.second, fontSize = 22.sp, color = t.accent)
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        x.temp.toString() + "°", fontSize = 30.sp, color = t.accent2,
+                        fontFamily = Mono, fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
         if (x == null) {
-            Text("Esperando ubicación e internet…", fontSize = 13.sp, color = t.dim)
+            Spacer(Modifier.height(6.dp))
+            Text("Clima: esperando ubicación e internet…", fontSize = 11.sp, color = t.dim)
         } else {
             val d = Weather.describe(x.code)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(d.second, fontSize = 32.sp, color = t.accent)
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    x.temp.toString() + "°", fontSize = 38.sp, color = t.accent2,
-                    fontFamily = Mono, fontWeight = FontWeight.Bold
-                )
-            }
-            Text(d.first, fontSize = 14.sp, color = t.text)
             Spacer(Modifier.height(4.dp))
-            Text("MÁX " + x.hi + "°  MÍN " + x.lo + "°", fontSize = 12.sp, color = t.dim, fontFamily = Mono)
-            Text("SENS. " + x.feels + "°  HUM " + x.hum + "%", fontSize = 12.sp, color = t.dim, fontFamily = Mono)
-            Text("VIENTO " + x.wind + " KM/H", fontSize = 12.sp, color = t.dim, fontFamily = Mono)
+            Text(d.first, fontSize = 13.sp, color = t.text)
+            Text("MÁX " + x.hi + "°  MÍN " + x.lo + "°", fontSize = 11.sp, color = t.dim, fontFamily = Mono)
+            Text("HUM " + x.hum + "%  VIENTO " + x.wind + " KM/H", fontSize = 11.sp, color = t.dim, fontFamily = Mono)
         }
     }
 }
@@ -759,7 +953,7 @@ fun AppsScreen(onClose: () -> Unit) {
     BackHandler(onBack = onClose)
     var apps by remember { mutableStateOf<List<AppItem>>(emptyList()) }
     LaunchedEffect(Unit) { apps = withContext(Dispatchers.Default) { launchable(ctx) } }
-    val shape = CutCornerShape(10.dp)
+    val shape = themeShape(t, small = true)
     Column(
         Modifier.fillMaxSize().background(t.bg).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -802,12 +996,15 @@ fun SettingsScreen(onClose: () -> Unit) {
     val t = LocalTheme.current
     BackHandler(onBack = onClose)
     val themeIdx by Store.themeIdx.collectAsState()
+    val mode by Store.mode.collectAsState()
     val mph by Store.mph.collectAsState()
+    val voice by Store.voice.collectAsState()
     var model by remember { mutableStateOf(Store.model.value) }
     var calib by remember { mutableStateOf(Store.calib.value.toString()) }
     var total by remember { mutableStateOf(String.format(Locale.US, "%.1f", Store.totalM.value / 1000)) }
+    var name by remember { mutableStateOf(Store.userName.value) }
     Column(
-        Modifier.fillMaxSize().background(t.bg).padding(24.dp),
+        Modifier.fillMaxSize().background(t.bg).verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Text(
@@ -819,18 +1016,41 @@ fun SettingsScreen(onClose: () -> Unit) {
             OutlinedTextField(total, { total = it }, label = { Text("Km total") }, singleLine = true, modifier = Modifier.weight(1f))
             OutlinedTextField(calib, { calib = it }, label = { Text("Calibración (1.00)") }, singleLine = true, modifier = Modifier.weight(1f))
         }
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            name, { name = it }, label = { Text("Tu nombre (para el saludo)") },
+            singleLine = true, modifier = Modifier.fillMaxWidth()
+        )
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically
+        ) {
             Tag("TEMA")
-            Chip("Cyberpunk", themeIdx == 0) { Store.setTheme(0) }
-            Chip("Evangelion", themeIdx == 1) { Store.setTheme(1) }
-            Spacer(Modifier.width(20.dp))
+            for (i in Themes.indices) Chip(Themes[i].name, themeIdx == i) { Store.setTheme(i) }
+        }
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically
+        ) {
+            Tag("MODO")
+            Chip("Oscuro", mode == 0) { Store.setMode(0) }
+            Chip("AMOLED", mode == 1) { Store.setMode(1) }
+            Chip("Claro", mode == 2) { Store.setMode(2) }
+            Spacer(Modifier.width(16.dp))
             Tag("UNIDAD")
             Chip("km/h", !mph) { Store.setMph(false) }
             Chip("mph", mph) { Store.setMph(true) }
+            Spacer(Modifier.width(16.dp))
+            Tag("SALUDO POR VOZ")
+            Chip("Sí", voice) { Store.setVoice(true) }
+            Chip("No", !voice) { Store.setVoice(false) }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
             NeonButton("GUARDAR", Modifier.width(150.dp)) {
                 Store.saveSettings(model, calib.toDoubleOrNull() ?: 1.0, total.toDoubleOrNull())
+                Store.setName(name)
                 onClose()
             }
             NeonButton("REINICIAR VIAJE", Modifier.width(210.dp)) { Store.resetTrip() }
