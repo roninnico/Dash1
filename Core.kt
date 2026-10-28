@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
@@ -26,16 +27,40 @@ import android.view.KeyEvent
 import androidx.core.app.NotificationManagerCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.cos
 import kotlin.math.floor
+import kotlin.math.max
 import kotlin.math.ln
 import kotlin.math.roundToInt
 import kotlin.math.tan
 
 // Vacío a propósito: permite leer y controlar la música de otras apps.
 class NotifListener : NotificationListenerService()
+
+// ---------------------------------------------------------------- Mantenimiento
+data class Maint(val key: String, val lastKm: Double, val everyKm: Int)
+
+val maintNames = linkedMapOf(
+    "aceite" to "Aceite del motor",
+    "aire" to "Filtro de aire",
+    "neum" to "Neumáticos (rotación)",
+    "frenos" to "Frenos (revisión)",
+    "bateria" to "Batería (revisión)"
+)
+val maintShort = mapOf(
+    "aceite" to "ACEITE", "aire" to "F.AIRE", "neum" to "NEUMÁT.",
+    "frenos" to "FRENOS", "bateria" to "BATERÍA"
+)
+val maintTips = mapOf(
+    "aceite" to "toca cambiar el aceite",
+    "aire" to "revisa el filtro de aire",
+    "neum" to "toca rotar los neumáticos",
+    "frenos" to "revisa los frenos",
+    "bateria" to "revisa la batería"
+)
 
 // ---------------------------------------------------------------- Estado y datos guardados
 object Store {
@@ -60,6 +85,19 @@ object Store {
     val greetText = MutableStateFlow("")
     val greetTick = MutableStateFlow(0L)
     val greetAt = MutableStateFlow(0L)
+    val blur = MutableStateFlow(6)            // 0 = nítido ... 10 = muy difuminado
+    val dim = MutableStateFlow(55)            // % que se oscurece la imagen de fondo
+    val layout = MutableStateFlow(0)          // 0 = reproductor al centro, 1 = clásico, 2 = mapa al centro
+    val uiScale = MutableStateFlow(100)       // % de tamaño de toda la interfaz
+    val cardAlpha = MutableStateFlow(86)      // % de opacidad de las tarjetas
+    val cornerKind = MutableStateFlow(-1)     // -1 = del tema, 0 = rectas, 1 = cortadas, 2 = redondas
+    val cornerDp = MutableStateFlow(16)
+    val borderDp = MutableStateFlow(-1)       // -1 = del tema
+    val accentOv = MutableStateFlow(0L)       // 0 = color del tema
+    val accent2Ov = MutableStateFlow(0L)
+    val dock = MutableStateFlow(listOf("auto:radio", "auto:bluetooth", "apps", "auto:youtube", "dash"))
+    val maint = MutableStateFlow(defaultMaint())
+    val bgRev = MutableStateFlow(0)           // sube cada vez que cambia un fondo
 
     fun init(c: Context) {
         ctx = c.applicationContext
@@ -72,6 +110,107 @@ object Store {
         mode.value = sp.getInt("mode", 0)
         userName.value = sp.getString("name", "Nico") ?: "Nico"
         voice.value = sp.getBoolean("voice", true)
+        blur.value = sp.getInt("blur", 6)
+        dim.value = sp.getInt("dim", 55)
+        layout.value = sp.getInt("layout", 0)
+        uiScale.value = sp.getInt("scale", 100)
+        cardAlpha.value = sp.getInt("alpha", 86)
+        cornerKind.value = sp.getInt("ckind", -1)
+        cornerDp.value = sp.getInt("cdp", 16)
+        borderDp.value = sp.getInt("bdp", -1)
+        accentOv.value = sp.getLong("acc", 0L)
+        accent2Ov.value = sp.getLong("acc2", 0L)
+        val d = (sp.getString("dock", "") ?: "").split("\n").filter { it.isNotEmpty() }
+        if (d.size == 5) dock.value = d
+        val parsed = HashMap<String, Maint>()
+        for (line in (sp.getString("maint", "") ?: "").split("\n")) {
+            val q = line.split("|")
+            if (q.size == 3) {
+                val l = q[1].toDoubleOrNull()
+                val e = q[2].toIntOrNull()
+                if (l != null && e != null) parsed[q[0]] = Maint(q[0], l, e)
+            }
+        }
+        maint.value = defaultMaint().map { parsed[it.key] ?: it }
+    }
+
+    private fun defaultMaint() = listOf(
+        Maint("aceite", -1.0, 10000), Maint("aire", -1.0, 20000),
+        Maint("neum", -1.0, 10000), Maint("frenos", -1.0, 20000), Maint("bateria", -1.0, 40000)
+    )
+
+    private fun saveMaint() {
+        sp.edit().putString("maint", maint.value.joinToString("\n") { it.key + "|" + it.lastKm + "|" + it.everyKm }).apply()
+    }
+
+    fun setMaint(key: String, lastKm: Double, everyKm: Int) {
+        maint.value = maint.value.map { if (it.key == key) Maint(key, lastKm, if (everyKm > 0) everyKm else it.everyKm) else it }
+        saveMaint()
+    }
+
+    // "Hecho hoy": marca el servicio con el kilometraje actual
+    fun maintDone(key: String) {
+        val now = Math.round(totalM.value / 100.0) / 10.0
+        maint.value = maint.value.map { if (it.key == key) Maint(key, now, it.everyKm) else it }
+        saveMaint()
+    }
+
+    // Kilómetros que faltan (negativo = vencido). null si no se ha configurado.
+    fun remaining(m: Maint): Double? =
+        if (m.lastKm < 0) null else m.lastKm + m.everyKm - totalM.value / 1000.0
+
+    fun nextDue(): Pair<Maint, Double>? {
+        var best: Pair<Maint, Double>? = null
+        for (m in maint.value) {
+            val r = remaining(m) ?: continue
+            val b = best
+            if (b == null || r < b.second) best = Pair(m, r)
+        }
+        return best
+    }
+
+    // Avisos para el saludo: lo que vence o está a 500 km o menos
+    fun dueNotes(): List<String> {
+        val out = ArrayList<String>()
+        for (m in maint.value) {
+            val r = remaining(m) ?: continue
+            if (r <= 500.0) out.add(maintTips[m.key] ?: m.key)
+        }
+        return out
+    }
+
+    private fun pi(k: String, v: Int) {
+        sp.edit().putInt(k, v).apply()
+    }
+
+    fun setLayout(i: Int) { layout.value = i; pi("layout", i) }
+    fun setScale(i: Int) { uiScale.value = i; pi("scale", i) }
+    fun setCardAlpha(i: Int) { cardAlpha.value = i; pi("alpha", i) }
+    fun setCornerKind(i: Int) { cornerKind.value = i; pi("ckind", i) }
+    fun setCornerDp(i: Int) { cornerDp.value = i; pi("cdp", i) }
+    fun setBorder(i: Int) { borderDp.value = i; pi("bdp", i) }
+    fun setDim(i: Int) { dim.value = i; pi("dim", i) }
+
+    fun setAccentOv(v: Long) {
+        accentOv.value = v
+        sp.edit().putLong("acc", v).apply()
+    }
+
+    fun setAccent2Ov(v: Long) {
+        accent2Ov.value = v
+        sp.edit().putLong("acc2", v).apply()
+    }
+
+    fun resetStyle() {
+        setCardAlpha(86); setCornerKind(-1); setCornerDp(16); setBorder(-1)
+        setAccentOv(0L); setAccent2Ov(0L); setBlur(6); setDim(55)
+    }
+
+    fun setDock(i: Int, spec: String) {
+        val l = dock.value.toMutableList()
+        if (i in l.indices) l[i] = spec
+        dock.value = l
+        sp.edit().putString("dock", l.joinToString("\n")).apply()
     }
 
     fun addDistance(meters: Double) {
@@ -116,9 +255,89 @@ object Store {
         sp.edit().putString("name", n.trim()).apply()
     }
 
+    fun setBlur(i: Int) {
+        blur.value = i
+        sp.edit().putInt("blur", i).apply()
+    }
+
     fun setVoice(v: Boolean) {
         voice.value = v
         sp.edit().putBoolean("voice", v).apply()
+    }
+}
+
+// ---------------------------------------------------------------- Fondos personalizados (uno por tema)
+object Backgrounds {
+    private fun file(c: Context, idx: Int) = File(c.filesDir, "bg_" + idx + ".jpg")
+
+    // También se acepta copiar la imagen a mano: Android/data/com.dash.radio/files/fondo_N.jpg
+    private fun extFile(c: Context, idx: Int): File? {
+        val d = c.getExternalFilesDir(null) ?: return null
+        for (n in listOf("fondo_" + idx + ".jpg", "fondo_" + idx + ".png", "fondo_" + idx + ".jpeg")) {
+            val f = File(d, n)
+            if (f.exists()) return f
+        }
+        return null
+    }
+
+    fun has(c: Context, idx: Int): Boolean = file(c, idx).exists() || extFile(c, idx) != null
+
+    // Guarda la imagen elegida, reducida a máx. 1400 px, para el tema idx
+    fun save(c: Context, idx: Int, uri: Uri): Boolean {
+        return try {
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            c.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o) }
+            var sample = 1
+            while (o.outWidth / sample > 1400 || o.outHeight / sample > 1400) sample *= 2
+            val o2 = BitmapFactory.Options().apply { inSampleSize = sample }
+            val bmp = c.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o2) }
+            if (bmp == null) {
+                false
+            } else {
+                val fmt = if (bmp.hasAlpha()) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
+                file(c, idx).outputStream().use { bmp.compress(fmt, 85, it) }
+                bmp.recycle()
+                true
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    fun remove(c: Context, idx: Int) {
+        file(c, idx).delete()
+        val d = c.getExternalFilesDir(null)
+        if (d != null) {
+            for (n in listOf("fondo_" + idx + ".jpg", "fondo_" + idx + ".png", "fondo_" + idx + ".jpeg")) {
+                try { File(d, n).delete() } catch (e: Exception) { }
+            }
+        }
+    }
+
+    // Carga el fondo y lo difumina reduciéndolo (se dibuja ampliado con filtro: queda borroso)
+    fun load(c: Context, idx: Int, blur: Int): Bitmap? {
+        var f: File? = file(c, idx)
+        if (f == null || !f.exists()) f = extFile(c, idx)
+        if (f == null) return null
+        return try {
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(f.path, o)
+            var sample = 1
+            while (o.outWidth / sample > 1400 || o.outHeight / sample > 1400) sample *= 2
+            val src = BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = sample })
+            if (src == null) {
+                null
+            } else if (blur <= 0) {
+                src
+            } else {
+                val k = 2 + blur * 3
+                val small = Bitmap.createScaledBitmap(src, max(8, src.width / k), max(8, src.height / k), true)
+                if (small !== src) src.recycle()
+                small
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 }
 
