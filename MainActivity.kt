@@ -102,50 +102,95 @@ fun tint(r: Float, g: Float, b: Float) = floatArrayOf(
     0f, 0f, -b, 0f, 255f * b,
     0f, 0f, 0f, 1f, 0f
 )
+val Cyberpunk = Theme(
+    "Cyberpunk",
 
-val Cyber = Theme(
-    "Cyberpunk", Color(0xFF04050A), Color(0xFF0D0F17),
-    Color(0xFFFCEE0A), Color(0xFF00F0FF), Color(0xFFFF2A6D),
-    Color(0xFFF2F2F2), Color(0xFF8A8F9C), tint(0.45f, 0.8f, 1f),
-    corner = 0, bw = 1f, speedTag = "VELOCIDAD", deco = 0
+    Color(0xFF050507),
+    Color(0xFF0D1017),
+
+    Color(0xFF00F5FF),
+    Color(0xFFFF0080),
+    Color(0xFF8B00FF),
+
+    Color.White,
+    Color(0xFF999999),
+
+    tint(0.35f,0.8f,1f),
+
+    corner = 0,
+    bw = 1.2f,
+
+    speedTag = "NETWORK",
+
+    deco = 0
 )
 val Nerv = Theme(
-    "Evangelion", Color(0xFF050308), Color(0xFF110A1A),
-    Color(0xFFFF7A00), Color(0xFF8CFF2E), Color(0xFFFF2D2D),
-    Color(0xFFF4EEFF), Color(0xFF8D7FA3), tint(0.7f, 0.35f, 0.9f),
-    corner = 1, bw = 1.2f, speedTag = "SINCRONIZACIÓN", deco = 1
-)
-val Naruto = Theme(
-    "Naruto", Color(0xFF0A0D16), Color(0xFF121826),
-    Color(0xFFFF7A1A), Color(0xFF35A7FF), Color(0xFFE5322D),
-    Color(0xFFF5F1EA), Color(0xFF8B93A7), tint(0.8f, 0.45f, 0.25f),
-    corner = 2, bw = 1.5f, speedTag = "CHAKRA", deco = 2
-)
-val DragonBall = Theme(
-    "Dragon Ball", Color(0xFF070A16), Color(0xFF0F1530),
-    Color(0xFFFF8A00), Color(0xFFFFE04A), Color(0xFFFF3B1F),
-    Color(0xFFFFF7E6), Color(0xFF9AA0B8), tint(0.9f, 0.6f, 0.2f),
-    corner = 2, bw = 2f, speedTag = "NIVEL DE PODER", deco = 3
-)
-val Street = Theme(
-    "Street Fighter", Color(0xFF0B0709), Color(0xFF1A0E12),
-    Color(0xFFE4002B), Color(0xFFFFD400), Color(0xFFFF6A1F),
-    Color(0xFFFFF4F4), Color(0xFFA08888), tint(0.9f, 0.25f, 0.25f),
-    corner = 3, bw = 2f, speedTag = "ROUND 1", deco = 4
-)
-val Turbo = Theme(
-    "Turbo", Color(0xFF08090A), Color(0xFF121416),
-    Color(0xFFC6FF00), Color(0xFFFFFFFF), Color(0xFFFF3D00),
-    Color(0xFFEDEFF2), Color(0xFF7D838C), tint(0.55f, 0.85f, 0.2f),
-    corner = 4, bw = 1.5f, speedTag = "TURBO", deco = 5
-)
-val Static = Theme(
-    "Static", Color(0xFF04060F), Color(0xFF0B1022),
-    Color(0xFF33A8FF), Color(0xFFFFE600), Color(0xFFB057FF),
-    Color(0xFFEAF4FF), Color(0xFF7C8AA6), tint(0.3f, 0.6f, 1f),
-    corner = 5, bw = 1.5f, speedTag = "VOLTAJE", deco = 6
+    "NERV",
+
+    Color(0xFF050505),
+    Color(0xFF101010),
+
+    Color(0xFFFFC300),
+    Color(0xFFE10600),
+    Color(0xFFFF6A00),
+
+    Color.White,
+    Color(0xFFA6A6A6),
+
+    tint(0.85f,0.35f,0.25f),
+
+    corner = 1,
+    bw = 2f,
+
+    speedTag = "SYSTEM",
+
+    deco = 1
 )
 
+val Vanilla = Theme(
+    "Vanilla",
+
+    Color(0xFF111317),
+    Color(0xFF1A1D24),
+
+    Color(0xFF5B95FF),
+    Color(0xFF9EC4FF),
+    Color(0xFFFF6060),
+
+    Color.White,
+    Color(0xFF97A0AA),
+
+    tint(0.45f,0.55f,0.75f),
+
+    corner = 2,
+    bw = 1f,
+
+    speedTag = "VELOCIDAD",
+
+    deco = 0
+)
+val Vanilla = Theme(
+    "Vanilla",
+
+    Color(0xFF111317),
+    Color(0xFF1A1D24),
+
+    Color(0xFF5B95FF),
+    Color(0xFF9EC4FF),
+    Color(0xFFFF6060),
+
+    Color.White,
+    Color(0xFF97A0AA),
+
+    tint(0.45f,0.55f,0.75f),
+
+    corner = 2,
+    bw = 1f,
+
+    speedTag = "VELOCIDAD",
+
+    deco = 0
+)
 val Themes = listOf(Cyber, Nerv, Naruto, DragonBall, Street, Turbo, Static)
 
 // modo: 0 = oscuro (el del tema), 1 = AMOLED (negro puro), 2 = claro
@@ -194,12 +239,9 @@ fun greeting(name: String, idx: Int, notes: List<String>): String {
     val n = name.trim()
     val who = if (n.isEmpty()) "" else ", " + n
     val head = when (idx) {
-        1 -> s + ", piloto" + (if (n.isEmpty()) "" else " " + n) + ". Sincronización lista."
-        2 -> s + who + ". ¡Que el chakra nos acompañe!"
-        3 -> s + who + ". ¡Tu nivel de poder está por las nubes!"
-        4 -> s + who + ". ¡Round uno contra el tráfico!"
-        5 -> s + who + ". Turbo listo."
-        6 -> s + who + ". Voltaje al máximo."
+        1 -> "$s, piloto. Sistema NERV operativo."
+        2 -> "$s$who. Red Cyberpunk conectada."
+        3 -> "$s$who. Modo Midnight preparado."
         else -> s + who + ". Conectado a la ciudad."
     }
     var msg = head + " ¿Listos para un nuevo viaje?"
@@ -755,45 +797,66 @@ fun Dash(onApps: () -> Unit, onSettings: (Int) -> Unit) {
                 Modifier.fillMaxWidth().weight(1f),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                when (layout) {
-                    1 -> { // Clásico
-                        GaugeCard(Modifier.weight(1f).fillMaxHeight()) { onSettings(3) }
-                        Column(
-                            Modifier.weight(1.25f).fillMaxHeight(),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            MapCard(Modifier.weight(1f).fillMaxWidth())
-                            MusicCard(Modifier.weight(1.25f).fillMaxWidth())
-                        }
-                        TimeWeatherCard(Modifier.weight(0.9f).fillMaxHeight())
-                    }
-                    2 -> { // Mapa al centro
-                        MusicCard(Modifier.weight(1f).fillMaxHeight())
-                        MapCard(Modifier.weight(1.3f).fillMaxHeight())
-                        Column(
-                            Modifier.weight(0.95f).fillMaxHeight(),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            TimeWeatherCard(Modifier.fillMaxWidth().weight(0.8f))
-                            GaugeCard(Modifier.fillMaxWidth().weight(1.7f)) { onSettings(3) }
-                        }
-                    }
-                    else -> { // Reproductor al centro
-                        Column(
-                            Modifier.weight(1f).fillMaxHeight(),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            TimeWeatherCard(Modifier.fillMaxWidth().weight(0.8f))
-                            GaugeCard(Modifier.fillMaxWidth().weight(1.7f)) { onSettings(3) }
-                        }
-                        MusicCard(Modifier.weight(1.1f).fillMaxHeight())
-                        MapCard(Modifier.weight(1f).fillMaxHeight())
-                    }
-                }
+when(layout) {
+
+    1 -> {
+
+        MapCard(
+            Modifier.weight(1.6f).fillMaxHeight()
+        )
+
+        Column(
+            Modifier.weight(1f).fillMaxHeight(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+
+            TimeWeatherCard(
+                Modifier.weight(0.8f)
+            )
+
+            MusicCard(
+                Modifier.weight(1f)
+            )
+
+            GaugeCard(
+                Modifier.weight(1.5f)
+            ) {
+                onSettings(3)
             }
-            Dock(onApps, onSettings)
         }
-        GreetBanner(Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
+    }
+
+    else -> {
+
+        Column(
+            Modifier.weight(1.7f).fillMaxHeight(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+
+            MapCard(
+                Modifier.weight(2f)
+            )
+
+            MusicCard(
+                Modifier.weight(1f)
+            )
+        }
+
+        Column(
+            Modifier.weight(0.8f).fillMaxHeight(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+
+            TimeWeatherCard(
+                Modifier.weight(1f)
+            )
+
+            GaugeCard(
+                Modifier.weight(1.6f)
+            ) {
+                onSettings(3)
+            }
+        }
     }
 }
 
@@ -889,7 +952,7 @@ fun Dock(onApps: () -> Unit, onSettings: (Int) -> Unit) {
     }
     val shape = themeShape(t)
     Row(
-        Modifier.fillMaxWidth().height(58.dp).clip(shape)
+        Modifier.fillMaxWidth()..heightIn(min = 56.dp).clip(shape)
             .background(t.card.copy(alpha = t.cardAlpha), shape)
             .border(t.bw.dp, t.accent.copy(alpha = 0.6f), shape).padding(horizontal = 8.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
@@ -1638,11 +1701,13 @@ fun SettingsScreen(initialTab: Int, onClose: () -> Unit) {
                     Row(
                         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Tag("DISEÑO")
-                        Chip("Reproductor al centro", layout == 0) { Store.setLayout(0) }
-                        Chip("Clásico", layout == 1) { Store.setLayout(1) }
-                        Chip("Mapa al centro", layout == 2) { Store.setLayout(2) }
+                    ) {Tag("DISEÑO")
+                        Chip("Dashboard", layout == 0) {
+                            Store.setLayout(0)
+                        }
+                        Chip("Navegación", layout == 1) {
+                            Store.setLayout(1)
+                        }
                     }
                     LabeledSlider("TAMAÑO DE LA INTERFAZ", scale.toString() + "%", scale.toFloat(), 70f..140f) {
                         Store.setScale(it.roundToInt())
