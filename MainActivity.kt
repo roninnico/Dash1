@@ -1,554 +1,742 @@
 package com.dash.radio
 
-import android.Manifest
-import android.content.BroadcastReceiver
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.location.Location
+import android.location.LocationListener
 import android.location.LocationManager
+import android.media.AudioManager
+import android.media.MediaMetadata
+import android.media.session.MediaController
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
 import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import android.os.SystemClock
-import android.provider.AlarmClock
-import android.provider.Settings
-import android.speech.tts.TextToSpeech
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.CutCornerShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.ColorMatrix
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.rotate
-import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.Density
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
-import androidx.core.graphics.drawable.toBitmap
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.text.SimpleDateFormat
-import java.util.Calendar
-import java.util.Date
-import java.util.Locale
+import android.service.notification.NotificationListenerService
+import android.view.KeyEvent
+import androidx.core.app.NotificationManagerCompat
+import kotlinx.coroutines.flow.MutableStateFlow
+import org.json.JSONObject
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.max
+import kotlin.math.ln
 import kotlin.math.roundToInt
-import kotlin.math.sin
+import kotlin.math.tan
 
-// ============================================================ Temas
-data class Theme(
-    val name: String,
-    val bg: Color, val card: Color, val accent: Color, val accent2: Color, val hot: Color,
-    val text: Color, val dim: Color, val map: FloatArray,
-    val corner: Int = 0, val bw: Float = 1f,
-    val light: Boolean = false, val onAccent: Color = Color.Black,
-    val speedTag: String = "VELOCIDAD", val deco: Int = 0,
-    val cardAlpha: Float = 0.86f, val customCorner: Int = -1, val cornerDp: Float = 16f
+// Vacío a propósito: permite leer y controlar la música de otras apps.
+class NotifListener : NotificationListenerService()
+
+// ---------------------------------------------------------------- Mantenimiento
+data class Maint(val key: String, val lastKm: Double, val everyKm: Int)
+
+val maintNames = linkedMapOf(
+    "aceite" to "Aceite del motor",
+    "aire" to "Filtro de aire",
+    "neum" to "Neumáticos (rotación)",
+    "frenos" to "Frenos (revisión)",
+    "bateria" to "Batería (revisión)"
+)
+val maintShort = mapOf(
+    "aceite" to "ACEITE", "aire" to "F.AIRE", "neum" to "NEUMÁT.",
+    "frenos" to "FRENOS", "bateria" to "BATERÍA"
+)
+val maintTips = mapOf(
+    "aceite" to "toca cambiar el aceite",
+    "aire" to "revisa el filtro de aire",
+    "neum" to "toca rotar los neumáticos",
+    "frenos" to "revisa los frenos",
+    "bateria" to "revisa la batería"
 )
 
-// Matriz para oscurecer/invertir el mapa y teñirlo con el color del tema
-fun tint(r: Float, g: Float, b: Float) = floatArrayOf(
-    -r, 0f, 0f, 0f, 255f * r,
-    0f, -g, 0f, 0f, 255f * g,
-    0f, 0f, -b, 0f, 255f * b,
-    0f, 0f, 0f, 1f, 0f
-)
+// ---------------------------------------------------------------- Estado y datos guardados
+object Store {
+    private lateinit var ctx: Context
+    private val sp get() = ctx.getSharedPreferences("dash", Context.MODE_PRIVATE)
 
-val Cyberpunk = Theme(
-    "Cyberpunk",
-    Color(0xFF050507),
-    Color(0xFF0D1017),
-    Color(0xFF00F5FF),
-    Color(0xFFFF0080),
-    Color(0xFF8B00FF),
-    Color.White,
-    Color(0xFF999999),
-    tint(0.35f, 0.8f, 1f),
-    corner = 0,
-    bw = 1.2f,
-    speedTag = "NETWORK",
-    deco = 0
-)
+    val speed = MutableStateFlow(0f)
+    val totalM = MutableStateFlow(0.0)
+    val tripM = MutableStateFlow(0.0)
+    val model = MutableStateFlow("Mi auto")
+    val calib = MutableStateFlow(1.0)
+    val gpsAcc = MutableStateFlow(-1f)
+    val lastFix = MutableStateFlow(0L)
+    val lat = MutableStateFlow(Double.NaN)
+    val lon = MutableStateFlow(Double.NaN)
+    val bearing = MutableStateFlow(0f)
+    val mph = MutableStateFlow(false)
+    val themeIdx = MutableStateFlow(0)
+    val mode = MutableStateFlow(0)            // 0 = oscuro, 1 = AMOLED, 2 = claro
+    val userName = MutableStateFlow("Nico")
+    val voice = MutableStateFlow(true)
+    val greetText = MutableStateFlow("")
+    val greetTick = MutableStateFlow(0L)
+    val greetAt = MutableStateFlow(0L)
+    val blur = MutableStateFlow(6)            // 0 = nítido ... 10 = muy difuminado
+    val dim = MutableStateFlow(55)            // % que se oscurece la imagen de fondo
+    val layout = MutableStateFlow(0)          // 0 = reproductor al centro, 1 = clásico, 2 = mapa al centro
+    val uiScale = MutableStateFlow(100)       // % de tamaño de toda la interfaz
+    val cardAlpha = MutableStateFlow(86)      // % de opacidad de las tarjetas
+    val cornerKind = MutableStateFlow(-1)     // -1 = del tema, 0 = rectas, 1 = cortadas, 2 = redondas
+    val cornerDp = MutableStateFlow(16)
+    val borderDp = MutableStateFlow(-1)       // -1 = del tema
+    val accentOv = MutableStateFlow(0L)       // 0 = color del tema
+    val accent2Ov = MutableStateFlow(0L)
+    val textScale = MutableStateFlow(100)     // % solo del texto
+    val gaugeSize = MutableStateFlow(100)     // % del anillo del velocímetro
+    val numSize = MutableStateFlow(100)       // % del número de velocidad
+    val colL = MutableStateFlow(100)          // % de ancho de cada columna
+    val colM = MutableStateFlow(100)
+    val colR = MutableStateFlow(100)
+    val mapZoom = MutableStateFlow(16)        // 12 (lejos) a 18 (muy cerca)
+    val dockPos = MutableStateFlow(0)         // 0 = abajo, 1 = izquierda, 2 = derecha
+    val cardOv = MutableStateFlow(0L)         // color de fondo de tarjetas elegido (0 = el del tema)
+    val textOv = MutableStateFlow(0L)         // color de texto elegido (0 = el del tema)
+    val greetShown = MutableStateFlow(0L)     // último saludo ya mostrado en pantalla
+    val dock = MutableStateFlow(listOf("auto:radio", "auto:bluetooth", "apps", "auto:youtube", "dash"))
+    val maint = MutableStateFlow(defaultMaint())
+    val carRev = MutableStateFlow(0)          // sube cuando cambia la foto del auto
+    val bgRev = MutableStateFlow(0)           // sube cada vez que cambia un fondo
 
-val Nerv = Theme(
-    "NERV",
-    Color(0xFF050505),
-    Color(0xFF101010),
-    Color(0xFFFFC300),
-    Color(0xFFE10600),
-    Color(0xFFFF6A00),
-    Color.White,
-    Color(0xFFA6A6A6),
-    tint(0.85f, 0.35f, 0.25f),
-    corner = 1,
-    bw = 2f,
-    speedTag = "SYSTEM",
-    deco = 1
-)
+    fun init(c: Context) {
+        ctx = c.applicationContext
+        totalM.value = sp.getString("total", "0")?.toDoubleOrNull() ?: 0.0
+        tripM.value = sp.getString("trip", "0")?.toDoubleOrNull() ?: 0.0
+        model.value = sp.getString("model", "Mi auto") ?: "Mi auto"
+        calib.value = sp.getString("calib", "1.0")?.toDoubleOrNull() ?: 1.0
+        mph.value = sp.getBoolean("mph", false)
+        themeIdx.value = sp.getInt("theme", 0)
+        mode.value = sp.getInt("mode", 0)
+        userName.value = sp.getString("name", "Nico") ?: "Nico"
+        voice.value = sp.getBoolean("voice", true)
+        blur.value = sp.getInt("blur", 6)
+        dim.value = sp.getInt("dim", 55)
+        layout.value = sp.getInt("layout", 0)
+        uiScale.value = sp.getInt("scale", 100)
+        cardAlpha.value = sp.getInt("alpha", 86)
+        cornerKind.value = sp.getInt("ckind", -1)
+        cornerDp.value = sp.getInt("cdp", 16)
+        borderDp.value = sp.getInt("bdp", -1)
+        accentOv.value = sp.getLong("acc", 0L)
+        accent2Ov.value = sp.getLong("acc2", 0L)
+        textScale.value = sp.getInt("tscale", 100)
+        gaugeSize.value = sp.getInt("gsize", 100)
+        numSize.value = sp.getInt("nsize", 100)
+        colL.value = sp.getInt("colL", 100)
+        colM.value = sp.getInt("colM", 100)
+        colR.value = sp.getInt("colR", 100)
+        textOv.value = sp.getLong("tov", 0L)
+        cardOv.value = sp.getLong("cov", 0L)
+        mapZoom.value = sp.getInt("mzoom", 16).coerceIn(12, 18)
+        dockPos.value = sp.getInt("dockpos", 0)
+        val d = (sp.getString("dock", "") ?: "").split("\n").filter { it.isNotEmpty() }
+        if (d.size == 5) dock.value = d
+        val parsed = HashMap<String, Maint>()
+        for (line in (sp.getString("maint", "") ?: "").split("\n")) {
+            val q = line.split("|")
+            if (q.size == 3) {
+                val l = q[1].toDoubleOrNull()
+                val e = q[2].toIntOrNull()
+                if (l != null && e != null) parsed[q[0]] = Maint(q[0], l, e)
+            }
+        }
+        maint.value = defaultMaint().map { parsed[it.key] ?: it }
+    }
 
-val Midnight = Theme(
-    "Midnight",
-    Color(0xFF030408),
-    Color(0xFF0A0E17),
-    Color(0xFF3388FF),
-    Color(0xFF00E5FF),
-    Color(0xFF7A00FF),
-    Color.White,
-    Color(0xFF8892B0),
-    tint(0.3f, 0.5f, 0.9f),
-    corner = 2,
-    bw = 1.2f,
-    speedTag = "TURBO",
-    deco = 0
-)
-
-val Vanilla = Theme(
-    "Vanilla",
-    Color(0xFF111317),
-    Color(0xFF1A1D24),
-    Color(0xFF5B95FF),
-    Color(0xFF9EC4FF),
-    Color(0xFFFF6060),
-    Color.White,
-    Color(0xFF97A0AA),
-    tint(0.45f, 0.55f, 0.75f),
-    corner = 2,
-    bw = 1f,
-    speedTag = "VELOCIDAD",
-    deco = 0
-)
-
-val Themes = listOf(Vanilla, Midnight, Nerv, Cyberpunk)
-
-// modo: 0 = oscuro (el del tema), 1 = AMOLED (negro puro), 2 = claro
-fun Theme.withMode(mode: Int): Theme = when (mode) {
-    1 -> copy(bg = Color.Black, card = Color(0xFF07070B), light = false, onAccent = Color.Black)
-    2 -> copy(
-        bg = Color(0xFFE9EBF0), card = Color.White,
-        accent = lerp(accent, Color.Black, 0.45f), accent2 = lerp(accent2, Color.Black, 0.5f),
-        hot = lerp(hot, Color.Black, 0.25f), text = Color(0xFF14151A), dim = Color(0xFF5B6070),
-        light = true, onAccent = Color.White
+    private fun defaultMaint() = listOf(
+        Maint("aceite", -1.0, 10000), Maint("aire", -1.0, 20000),
+        Maint("neum", -1.0, 10000), Maint("frenos", -1.0, 20000), Maint("bateria", -1.0, 40000)
     )
-    else -> this
+
+    private fun saveMaint() {
+        sp.edit().putString("maint", maint.value.joinToString("\n") { it.key + "|" + it.lastKm + "|" + it.everyKm }).apply()
+    }
+
+    fun setMaint(key: String, lastKm: Double, everyKm: Int) {
+        maint.value = maint.value.map { if (it.key == key) Maint(key, lastKm, if (everyKm > 0) everyKm else it.everyKm) else it }
+        saveMaint()
+    }
+
+    fun maintDone(key: String) {
+        val now = Math.round(totalM.value / 100.0) / 10.0
+        maint.value = maint.value.map { if (it.key == key) Maint(key, now, it.everyKm) else it }
+        saveMaint()
+    }
+
+    fun remaining(m: Maint): Double? =
+        if (m.lastKm < 0) null else m.lastKm + m.everyKm - totalM.value / 1000.0
+
+    fun nextDue(): Pair<Maint, Double>? {
+        var best: Pair<Maint, Double>? = null
+        for (m in maint.value) {
+            val r = remaining(m) ?: continue
+            val b = best
+            if (b == null || r < b.second) best = Pair(m, r)
+        }
+        return best
+    }
+
+    fun dueNotes(): List<String> {
+        val out = ArrayList<String>()
+        for (m in maint.value) {
+            val r = remaining(m) ?: continue
+            if (r <= 500.0) out.add(maintTips[m.key] ?: m.key)
+        }
+        return out
+    }
+
+    private fun pi(k: String, v: Int) {
+        sp.edit().putInt(k, v).apply()
+    }
+
+    fun setLayout(i: Int) { layout.value = i; pi("layout", i) }
+    fun setScale(i: Int) { uiScale.value = i; pi("scale", i) }
+    fun setCardAlpha(i: Int) { cardAlpha.value = i; pi("alpha", i) }
+    fun setCornerKind(i: Int) { cornerKind.value = i; pi("ckind", i) }
+    fun setCornerDp(i: Int) { cornerDp.value = i; pi("cdp", i) }
+    fun setBorder(i: Int) { borderDp.value = i; pi("bdp", i) }
+    fun setDim(i: Int) { dim.value = i; pi("dim", i) }
+
+    fun setAccentOv(v: Long) {
+        accentOv.value = v
+        sp.edit().putLong("acc", v).apply()
+    }
+
+    fun setAccent2Ov(v: Long) {
+        accent2Ov.value = v
+        sp.edit().putLong("acc2", v).apply()
+    }
+
+    fun setTextScale(i: Int) { textScale.value = i; pi("tscale", i) }
+    fun setGaugeSize(i: Int) { gaugeSize.value = i; pi("gsize", i) }
+    fun setNumSize(i: Int) { numSize.value = i; pi("nsize", i) }
+    fun setColL(i: Int) { colL.value = i; pi("colL", i) }
+    fun setColM(i: Int) { colM.value = i; pi("colM", i) }
+    fun setColR(i: Int) { colR.value = i; pi("colR", i) }
+
+    fun shouldGreet(now: Long): Boolean {
+        val last = sp.getLong("lastgreet", 0L)
+        val boot = now - SystemClock.elapsedRealtime()
+        return last == 0L || last < boot || now - last > 30 * 60 * 1000L
+    }
+
+    fun markGreeted(now: Long) {
+        sp.edit().putLong("lastgreet", now).apply()
+    }
+
+    fun setMapZoom(z: Int) {
+        val v = z.coerceIn(12, 18)
+        mapZoom.value = v
+        pi("mzoom", v)
+    }
+
+    fun setDockPos(i: Int) { dockPos.value = i; pi("dockpos", i) }
+
+    fun setCardOv(v: Long) {
+        cardOv.value = v
+        sp.edit().putLong("cov", v).apply()
+    }
+
+    fun setTextOv(v: Long) {
+        textOv.value = v
+        sp.edit().putLong("tov", v).apply()
+    }
+
+    fun resetStyle() {
+        setCardAlpha(86); setCornerKind(-1); setCornerDp(16); setBorder(-1)
+        setAccentOv(0L); setAccent2Ov(0L); setTextOv(0L); setCardOv(0L); setBlur(6); setDim(55)
+    }
+
+    fun resetSizes() {
+        setScale(100); setTextScale(100); setGaugeSize(100); setNumSize(100)
+        setColL(100); setColM(100); setColR(100)
+    }
+
+    fun setDock(i: Int, spec: String) {
+        val l = dock.value.toMutableList()
+        if (i in l.indices) l[i] = spec
+        dock.value = l
+        sp.edit().putString("dock", l.joinToString("\n")).apply()
+    }
+
+    fun addDistance(meters: Double) {
+        val d = meters * calib.value
+        totalM.value += d
+        tripM.value += d
+        sp.edit().putString("total", totalM.value.toString())
+            .putString("trip", tripM.value.toString()).apply()
+    }
+
+    fun resetTrip() {
+        tripM.value = 0.0
+        sp.edit().putString("trip", "0").apply()
+    }
+
+    fun saveSettings(name: String, calibration: Double, totalKm: Double?) {
+        model.value = name
+        calib.value = if (calibration > 0) calibration else 1.0
+        if (totalKm != null) totalM.value = totalKm * 1000
+        sp.edit().putString("model", model.value)
+            .putString("calib", calib.value.toString())
+            .putString("total", totalM.value.toString()).apply()
+    }
+
+    fun setMph(v: Boolean) {
+        mph.value = v
+        sp.edit().putBoolean("mph", v).apply()
+    }
+
+    fun setTheme(i: Int) {
+        themeIdx.value = i
+        sp.edit().putInt("theme", i).apply()
+    }
+
+    fun setMode(i: Int) {
+        mode.value = i
+        sp.edit().putInt("mode", i).apply()
+    }
+
+    fun setName(n: String) {
+        userName.value = n.trim()
+        sp.edit().putString("name", n.trim()).apply()
+    }
+
+    fun setBlur(i: Int) {
+        blur.value = i
+        sp.edit().putInt("blur", i).apply()
+    }
+
+    fun setVoice(v: Boolean) {
+        voice.value = v
+        sp.edit().putBoolean("voice", v).apply()
+    }
 }
 
-fun ovColor(v: Long, light: Boolean): Color {
-    val c = Color(v.toInt())
-    return if (light) lerp(c, Color.Black, 0.45f) else c
-}
+// ---------------------------------------------------------------- Fondos personalizados
+object Backgrounds {
+    private fun file(c: Context, idx: Int) = File(c.filesDir, "bg_" + idx + ".jpg")
 
-fun themeShape(t: Theme, small: Boolean = false): Shape {
-    val k = if (small) 0.5f else 1f
-    if (t.customCorner >= 0) {
-        val d = (t.cornerDp * k).dp
-        return when (t.customCorner) {
-            0 -> RoundedCornerShape(0.dp)
-            1 -> CutCornerShape(d)
-            else -> RoundedCornerShape(d)
+    private fun extFile(c: Context, idx: Int): File? {
+        val d = c.getExternalFilesDir(null) ?: return null
+        for (n in listOf("fondo_" + idx + ".jpg", "fondo_" + idx + ".png", "fondo_" + idx + ".jpeg")) {
+            val f = File(d, n)
+            if (f.exists()) return f
+        }
+        return null
+    }
+
+    fun has(c: Context, idx: Int): Boolean = file(c, idx).exists() || extFile(c, idx) != null
+
+    fun save(c: Context, idx: Int, uri: Uri): Boolean {
+        return try {
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            c.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o) }
+            var sample = 1
+            while (o.outWidth / sample > 1400 || o.outHeight / sample > 1400) sample *= 2
+            val o2 = BitmapFactory.Options().apply { inSampleSize = sample }
+            val bmp = c.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o2) }
+            if (bmp == null) {
+                false
+            } else {
+                val fmt = if (bmp.hasAlpha()) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
+                file(c, idx).outputStream().use { bmp.compress(fmt, 85, it) }
+                bmp.recycle()
+                true
+            }
+        } catch (e: Exception) {
+            false
         }
     }
-    return when (t.corner) {
-        1 -> CutCornerShape((10 * k).dp)
-        2 -> RoundedCornerShape((18 * k).dp)
-        else -> RoundedCornerShape(0.dp)
-    }
-}
 
-val LocalTheme = compositionLocalOf { Cyberpunk }
-val Mono = FontFamily.Monospace
+    private fun carFile(c: Context) = File(c.filesDir, "car.png")
 
-fun greeting(name: String, idx: Int, notes: List<String>): String {
-    val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
-    val s = if (h < 12) "Buenos días" else if (h < 19) "Buenas tardes" else "Buenas noches"
-    val n = name.trim()
-    val who = if (n.isEmpty()) "" else ", " + n
-    val head = when (idx) {
-        1 -> "$s, piloto. Sistema NERV operativo."
-        2 -> "$s$who. Red Cyberpunk conectada."
-        3 -> "$s$who. Modo Midnight preparado."
-        else -> s + who + ". Conectado a la ciudad."
-    }
-    var msg = head + " ¿Listos para un nuevo viaje?"
-    if (notes.isNotEmpty()) msg += " Ojo: " + notes.joinToString(" y ") + "."
-    return msg
-}
-
-// ============================================================ Actividad
-class MainActivity : ComponentActivity() {
-    private val perm = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { startTrip() }
-
-    private var tts: TextToSpeech? = null
-    private var ttsReady = false
-    private var pendingSpeech: String? = null
-
-    private val screenOn = object : BroadcastReceiver() {
-        override fun onReceive(c: Context?, i: Intent?) { greet() }
-    }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        Store.init(this)
-        setContent {
-            val idx by Store.themeIdx.collectAsState()
-            val mode by Store.mode.collectAsState()
-            val aOv by Store.accentOv.collectAsState()
-            val a2Ov by Store.accent2Ov.collectAsState()
-            val alphaPct by Store.cardAlpha.collectAsState()
-            val ck by Store.cornerKind.collectAsState()
-            val cd by Store.cornerDp.collectAsState()
-            val bd by Store.borderDp.collectAsState()
-            val scale by Store.uiScale.collectAsState()
-            val theme = remember(idx, mode, aOv, a2Ov, alphaPct, ck, cd, bd) {
-                var th = Themes[idx.coerceIn(0, Themes.size - 1)].withMode(mode)
-                if (aOv != 0L) th = th.copy(accent = ovColor(aOv, th.light))
-                if (a2Ov != 0L) th = th.copy(accent2 = ovColor(a2Ov, th.light))
-                th.copy(
-                    cardAlpha = alphaPct / 100f, customCorner = ck, cornerDp = cd.toFloat(),
-                    bw = if (bd >= 0) bd.toFloat() else th.bw
-                )
+    fun saveCar(c: Context, uri: Uri): Boolean {
+        return try {
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            c.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o) }
+            var sample = 1
+            while (o.outWidth / sample > 1200 || o.outHeight / sample > 1200) sample *= 2
+            val o2 = BitmapFactory.Options().apply { inSampleSize = sample }
+            val bmp = c.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o2) }
+            if (bmp == null) {
+                false
+            } else {
+                carFile(c).outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                bmp.recycle()
+                true
             }
-            val base = LocalDensity.current
-            CompositionLocalProvider(
-                LocalTheme provides theme,
-                LocalDensity provides Density(base.density * scale / 100f, base.fontScale)
-            ) {
-                MaterialTheme(
-                    colorScheme = if (theme.light) lightColorScheme(
-                        primary = theme.accent, onPrimary = Color.White, secondary = theme.accent2,
-                        background = theme.bg, surface = theme.card, onSurface = theme.text
-                    ) else darkColorScheme(
-                        primary = theme.accent, onPrimary = Color.Black, secondary = theme.accent2,
-                        background = theme.bg, surface = theme.card, onSurface = theme.text
-                    )
-                ) {
-                    var screen by remember { mutableStateOf(0) }
-                    var tab by remember { mutableStateOf(0) }
-                    when (screen) {
-                        1 -> AppsScreen { screen = 0 }
-                        2 -> SettingsScreen(tab) { screen = 0 }
-                        else -> Dash(onApps = { screen = 1 }, onSettings = { t -> tab = t; screen = 2 })
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    fun loadCar(c: Context): Bitmap? {
+        val f = carFile(c)
+        if (!f.exists()) return null
+        return try { BitmapFactory.decodeFile(f.path) } catch (e: Exception) { null }
+    }
+
+    fun removeCar(c: Context) {
+        carFile(c).delete()
+    }
+
+    fun remove(c: Context, idx: Int) {
+        file(c, idx).delete()
+        val d = c.getExternalFilesDir(null)
+        if (d != null) {
+            for (n in listOf("fondo_" + idx + ".jpg", "fondo_" + idx + ".png", "fondo_" + idx + ".jpeg")) {
+                try { File(d, n).delete() } catch (e: Exception) { }
+            }
+        }
+    }
+
+    fun load(c: Context, idx: Int, blur: Int): Bitmap? {
+        var f: File? = file(c, idx)
+        if (f == null || !f.exists()) f = extFile(c, idx)
+        if (f == null) return null
+        return try {
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(f.path, o)
+            var sample = 1
+            while (o.outWidth / sample > 1400 || o.outHeight / sample > 1400) sample *= 2
+            val src = BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = sample })
+            if (src == null) {
+                null
+            } else if (blur <= 0) {
+                src
+            } else {
+                val k = 2 + blur * 3
+                val small = Bitmap.createScaledBitmap(src, max(8, src.width / k), max(8, src.height / k), true)
+                if (small !== src) src.recycle()
+                small
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+}
+
+// ---------------------------------------------------------------- Música
+object MediaHub {
+    class Sess(val pkg: String, val label: String, val ctl: MediaController)
+
+    data class Now(
+        val pkg: String = "",
+        val label: String = "",
+        val title: String = "",
+        val artist: String = "",
+        val art: Bitmap? = null,
+        val playing: Boolean = false,
+        val durMs: Long = 0L,
+        val posMs: Long = 0L,
+        val posAt: Long = 0L,
+        val speed: Float = 1f
+    )
+
+    val sessions = MutableStateFlow<List<Sess>>(emptyList())
+    val picked = MutableStateFlow("")
+    val now = MutableStateFlow(Now())
+
+    private var started = false
+    private var appCtx: Context? = null
+    private var lastKey = ""
+    private var lastArt: Bitmap? = null
+    private val registered = ArrayList<Pair<MediaController, MediaController.Callback>>()
+
+    fun hasAccess(c: Context): Boolean =
+        NotificationManagerCompat.getEnabledListenerPackages(c).contains(c.packageName)
+
+    fun ensure(c: Context) {
+        if (started || !hasAccess(c)) return
+        appCtx = c.applicationContext
+        try {
+            val m = c.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
+            val comp = ComponentName(c, NotifListener::class.java)
+            m.addOnActiveSessionsChangedListener({ list -> reload(list) }, comp)
+            reload(m.getActiveSessions(comp))
+            started = true
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun reload(list: List<MediaController>?) {
+        for ((c, cb) in registered) {
+            try { c.unregisterCallback(cb) } catch (e: Exception) { }
+        }
+        registered.clear()
+        val c = appCtx ?: return
+        val pm = c.packageManager
+        val out = ArrayList<Sess>()
+        for (k in list.orEmpty()) {
+            val cb = object : MediaController.Callback() {
+                override fun onMetadataChanged(metadata: MediaMetadata?) { refresh() }
+                override fun onPlaybackStateChanged(state: PlaybackState?) { refresh() }
+            }
+            try { k.registerCallback(cb) } catch (e: Exception) { }
+            registered.add(Pair(k, cb))
+            val label = try {
+                pm.getApplicationLabel(pm.getApplicationInfo(k.packageName, 0)).toString()
+            } catch (e: Exception) {
+                k.packageName
+            }
+            out.add(Sess(k.packageName, label, k))
+        }
+        sessions.value = out
+        refresh()
+    }
+
+    private fun chosen(): Sess? {
+        val l = sessions.value
+        val p = picked.value
+        if (p.isNotEmpty()) {
+            val m = l.firstOrNull { it.pkg == p }
+            if (m != null) return m
+        }
+        return l.firstOrNull()
+    }
+
+    fun refresh() {
+        val s = chosen()
+        if (s == null) {
+            now.value = Now()
+            return
+        }
+        val meta = s.ctl.metadata
+        val state = s.ctl.playbackState
+        val title = meta?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: ""
+        val artist = meta?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
+        val dur = meta?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
+        val art = meta?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+            ?: meta?.getBitmap(MediaMetadata.METADATA_KEY_ART)
+
+        val key = s.pkg + "|" + title + "|" + artist
+                val key = s.pkg + "|" + title + "|" + artist
+        val finalArt = if (key == lastKey) lastArt else {
+            lastKey = key
+            lastArt = art
+            art
+        }
+
+        val playing = state?.state == PlaybackState.STATE_PLAYING
+        val pos = state?.position ?: 0L
+        val posAt = state?.lastPositionUpdateTime ?: SystemClock.elapsedRealtime()
+        val speed = state?.playbackSpeed ?: 1f
+
+                now.value = Now(s.pkg, s.label, title, artist, finalArt, playing, dur, pos, posAt, speed)
+    }
+
+    fun play() { chosen()?.ctl?.transportControls?.play() }
+    fun pause() { chosen()?.ctl?.transportControls?.pause() }
+    fun next() { chosen()?.ctl?.transportControls?.skipToNext() }
+    fun prev() { chosen()?.ctl?.transportControls?.skipToPrevious() }
+    fun seekTo(pos: Long) { chosen()?.ctl?.transportControls?.seekTo(pos) }
+}
+
+// ---------------------------------------------------------------- Servicio GPS / Ubicación
+class TripService : Service() {
+    private var locMgr: LocationManager? = null
+    private var locList: LocationListener? = null
+    private var lastLoc: Location? = null
+
+    override fun onBind(i: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        val chan = NotificationChannel("dash_trip", "Viaje", NotificationManager.IMPORTANCE_LOW)
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(chan)
+        val note = Notification.Builder(this, "dash_trip")
+            .setContentTitle("Dash Radio activo")
+            .setContentText("Registrando velocidad y GPS")
+            .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+            .build()
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(1, note, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+        } else {
+            startForeground(1, note)
+        }
+        locMgr = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        locList = object : LocationListener {
+            override fun onLocationChanged(l: Location) {
+                val now = SystemClock.elapsedRealtime()
+                val prev = lastLoc
+                lastLoc = l
+                Store.lat.value = l.latitude
+                Store.lon.value = l.longitude
+                Store.bearing.value = l.bearing
+                Store.gpsAcc.value = l.accuracy
+                Store.lastFix.value = now
+
+                val spd = if (l.hasSpeed()) l.speed * 3.6f else 0f
+                Store.speed.value = spd
+
+                if (prev != null) {
+                    val dist = l.distanceTo(prev).toDouble()
+                    if (dist in 0.5..100.0) {
+                        Store.addDistance(dist)
                     }
                 }
             }
+            override fun onProviderEnabled(provider: String) {}
+            override fun onProviderDisabled(provider: String) {}
         }
-        val need = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        if (Build.VERSION.SDK_INT >= 33) need.add(Manifest.permission.POST_NOTIFICATIONS)
-        perm.launch(need.toTypedArray())
-        registerReceiver(screenOn, IntentFilter(Intent.ACTION_SCREEN_ON))
-        greet()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        startTrip()
+        try {
+            locMgr?.requestLocationUpdates(LocationManager.GPS_PROVIDER, 800L, 1f, locList!!)
+        } catch (e: Exception) {
+        }
     }
 
     override fun onDestroy() {
-        try { unregisterReceiver(screenOn) } catch (e: Exception) { }
-        tts?.shutdown()
+        try {
+            if (locList != null) locMgr?.removeUpdates(locList!!)
+        } catch (e: Exception) {
+        }
         super.onDestroy()
     }
-
-    private fun startTrip() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-            == PackageManager.PERMISSION_GRANTED
-        ) ContextCompat.startForegroundService(this, Intent(this, TripService::class.java))
-    }
-
-    private fun greet() {
-        val now = System.currentTimeMillis()
-        if (Store.greetAt.value != 0L && now - Store.greetAt.value < 20 * 60 * 1000L) return
-        Store.greetAt.value = now
-        val msg = greeting(Store.userName.value, Store.themeIdx.value, Store.dueNotes())
-        Store.greetText.value = msg
-        Store.greetTick.value = now
-        if (Store.voice.value) speak(msg)
-    }
-
-    private fun speak(text: String) {
-        val engine = tts
-        if (engine == null) {
-            pendingSpeech = text
-            tts = TextToSpeech(this) { status ->
-                if (status == TextToSpeech.SUCCESS) {
-                    tts?.setLanguage(Locale("es"))
-                    ttsReady = true
-                    val p = pendingSpeech
-                    pendingSpeech = null
-                    if (p != null) tts?.speak(p, TextToSpeech.QUEUE_FLUSH, null, "greet")
-                }
-            }
-        } else if (ttsReady) {
-            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "greet")
-        } else {
-            pendingSpeech = text
-        }
-    }
 }
 
-// ============================================================ Utilidades
-fun launchPkg(c: Context, pkg: String) {
-    val i = c.packageManager.getLaunchIntentForPackage(pkg) ?: return
-    try { c.startActivity(i) } catch (e: Exception) { }
-}
-
-fun openClock(c: Context) {
-    val pm = c.packageManager
-    val tries = listOf(
-        Intent(AlarmClock.ACTION_SHOW_ALARMS),
-        pm.getLaunchIntentForPackage("com.google.android.deskclock"),
-        pm.getLaunchIntentForPackage("com.android.deskclock")
-    )
-    for (i in tries) {
-        if (i == null) continue
-        try {
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            c.startActivity(i)
-            return
-        } catch (e: Exception) { }
-    }
-}
-
-fun lastKnown(c: Context): Location? {
-    val lm = c.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-    return try {
-        lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-            ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-    } catch (e: Exception) {
-        null
-    }
-}
-
-fun fmt(ms: Long): String {
-    val s = max(0L, ms) / 1000
-    return (s / 60).toString() + ":" + (s % 60).toString().padStart(2, '0')
-}
-
-val knownMusic = listOf(
-    "com.spotify.music" to "Spotify",
-    "com.google.android.apps.youtube.music" to "YT Music",
-    "org.videolan.vlc" to "VLC",
-    "com.maxmpz.audioplayer" to "Poweramp",
-    "com.google.android.youtube" to "YouTube",
-    "com.android.music" to "Música"
-)
-
-val knownNav = listOf(
-    "com.google.android.apps.maps" to "Maps",
-    "com.waze" to "Waze",
-    "net.osmand" to "OsmAnd",
-    "net.osmand.plus" to "OsmAnd+",
-    "app.organicmaps" to "Organic"
-)
-
-// ============================================================ Piezas visuales
+// ============================================================ Pantallas principales
 @Composable
-fun NeonCard(
-    modifier: Modifier = Modifier,
-    tag: String? = null,
-    pad: Dp = 14.dp,
-    content: @Composable ColumnScope.() -> Unit
-) {
+fun Dash(onApps: () -> Unit, onSettings: (Int) -> Unit) {
     val t = LocalTheme.current
-    val shape = themeShape(t)
-    Column(
-        modifier.clip(shape).background(t.card.copy(alpha = t.cardAlpha), shape)
-            .border(t.bw.dp, t.accent.copy(alpha = 0.6f), shape).padding(pad)
-    ) {
-        if (tag != null) Tag(tag)
-        content()
+    val layout by Store.layout.collectAsState()
+    val ctx = LocalContext.current
+
+    LaunchedEffect(Unit) {
+        MediaHub.ensure(ctx)
     }
-}
 
-@Composable
-fun Tag(text: String) {
-    val t = LocalTheme.current
-    Text(text, fontSize = 11.sp, color = t.accent, fontFamily = Mono, letterSpacing = 2.sp)
-}
-
-@Composable
-fun NeonButton(text: String, modifier: Modifier, onClick: () -> Unit) {
-    val t = LocalTheme.current
-    val shape = themeShape(t, small = true)
     Box(
-        modifier.height(46.dp).clip(shape).background(t.card.copy(alpha = t.cardAlpha), shape)
-            .border(t.bw.dp, t.accent, shape).clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
+        Modifier.fillMaxSize().background(t.bg)
     ) {
-        Text(
-            text, color = t.accent, fontSize = 15.sp, fontFamily = Mono,
-            fontWeight = FontWeight.Bold, letterSpacing = 2.sp
-        )
-    }
-}
-
-@Composable
-fun Chip(text: String, selected: Boolean, onClick: () -> Unit) {
-    val t = LocalTheme.current
-    val shape = themeShape(t, small = true)
-    Box(
-        Modifier.clip(shape)
-            .background(if (selected) t.accent else Color.Transparent, shape)
-            .border(1.dp, t.accent, shape)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 5.dp)
-    ) {
-        Text(
-            text.uppercase(), fontSize = 12.sp, fontFamily = Mono, maxLines = 1,
-            color = if (selected) t.onAccent else t.accent
-        )
-    }
-}
-
-@Composable
-fun Glyph(kind: Int, color: Color, modifier: Modifier = Modifier) {
-    Canvas(modifier) {
-        val w = size.width
-        val h = size.height
-        when (kind) {
-            0 -> drawPath(Path().apply {
-                moveTo(w * 0.25f, h * 0.15f); lineTo(w * 0.85f, h * 0.5f)
-                lineTo(w * 0.25f, h * 0.85f); close()
-            }, color)
-            1 -> {
-                drawRect(color, Offset(w * 0.22f, h * 0.15f), Size(w * 0.2f, h * 0.7f))
-                drawRect(color, Offset(w * 0.58f, h * 0.15f), Size(w * 0.2f, h * 0.7f))
-            }
-            2 -> drawRect(color, Offset(w * 0.2f, h * 0.2f), Size(w * 0.6f, h * 0.6f))
-            3 -> {
-                drawPath(Path().apply {
-                    moveTo(w * 0.15f, h * 0.2f); lineTo(w * 0.7f, h * 0.5f)
-                    lineTo(w * 0.15f, h * 0.8f); close()
-                }, color)
-                drawRect(color, Offset(w * 0.72f, h * 0.2f), Size(w * 0.13f, h * 0.6f))
-            }
-            4 -> {
-                drawPath(Path().apply {
-                    moveTo(w * 0.85f, h * 0.2f); lineTo(w * 0.3f, h * 0.5f)
-                    lineTo(w * 0.85f, h * 0.8f); close()
-                }, color)
-                drawRect(color, Offset(w * 0.15f, h * 0.2f), Size(w * 0.13f, h * 0.6f))
-            }
-            5 -> {
-                for (r in 0..2) for (c in 0..2) {
-                    drawRect(
-                        color, Offset(w * (0.12f + 0.3f * c), h * (0.12f + 0.3f * r)),
-                        Size(w * 0.22f, h * 0.22f)
-                    )
-                }
-            }
-            else -> {
-                val p = Path().apply {
-                    moveTo(w * 0.25f, h * 0.30f); lineTo(w * 0.72f, h * 0.70f)
-                    lineTo(w * 0.50f, h * 0.90f); lineTo(w * 0.50f, h * 0.10f)
-                    lineTo(w * 0.72f, h * 0.30f); lineTo(w * 0.25f, h * 0.70f)
-                }
-                drawPath(p, color, style = Stroke(width = w * 0.09f))
-            }
-        }
-    }
-}
-
-@Composable
-fun CtlBtn(kind: Int, big: Boolean, onClick: () -> Unit, k: Float = 1f) {
-    val t = LocalTheme.current
-    val s = (if (big) 50.dp else 40.dp) * k
-    Box(
-        Modifier.size(s).clip(CircleShape)
-            .border(if (big) 2.dp else 1.dp, if (big) t.accent2 else t.accent.copy(alpha = 0.6f), CircleShape)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Glyph(kind, if (big) t.accent2 else t.text, Modifier.size(s * 0.55f))
-    }
-}
-
-@Composable
-fun SeekBar(frac: Float, enabled: Boolean, modifier: Modifier, onSeek: (Float) -> Unit) {
-    val t = LocalTheme.current
-    var drag by remember { mutableStateOf<Float?>(null) }
-    val f = drag ?: frac
-    val seek by rememberUpdatedState(onSeek)
-    Canvas(
-        modifier.height(22.dp)
-            .pointerInput(enabled) {
-                if (enabled) {
-                    detectTapGestures { o -> seek((o.x / size.width).coerceIn(0f, 1f)) }
-                }
-            }
-            .pointerInput(enabled) {
-                if (enabled) {
-                    detectHorizontalDragGestures(
-                        onDragStart = { o -> drag = (o.x / size.width).coerceIn(0f, 1f) },
-                        onDragEnd = {
-                            val d = drag
-                            if (d != null) seek(d)
-                            drag = null
-                        },
-                        onDragCancel = { drag = null },
-                        onHorizontalDrag = { change, _ ->
-                            drag = (change.position.x / size.width).coerceIn(0f, 1f)
+        Column(
+            Modifier.fillMaxSize().padding(12.dp),
+            verticalArrangement = Arrangement.spaceBetween
+        ) {
+            Row(
+                Modifier.fillMaxWidth().weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                when (layout) {
+                    1 -> {
+                        MapCard(Modifier.weight(1.6f).fillMaxHeight())
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight(),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            TimeWeatherCard(Modifier.weight(0.8f))
+                            MusicCard(Modifier.weight(1f))
+                            GaugeCard(Modifier.weight(1.5f)) { onSettings(3) }
                         }
-                    )
+                    }
+                    else -> {
+                        Column(
+                            Modifier.weight(1.7f).fillMaxHeight(),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            MapCard(Modifier.weight(2f))
+                            MusicCard(Modifier.weight(1f))
+                        }
+                        Column(
+                            Modifier.weight(0.8f).fillMaxHeight(),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            TimeWeatherCard(Modifier.weight(1f))
+                            GaugeCard(Modifier.weight(1.6f)) { onSettings(3) }
+                        }
+                    }
                 }
             }
-    ) {
-        val y = size.height / 2f
-        drawLine(t.dim.copy(alpha = 0.3f), Offset(0f, y), Offset(size.width, y), 4.dp.toPx())
-        if (f > 0f) {
-            drawLine(t.accent, Offset(0f, y), Offset(size.width * f, y), 4.dp.toPx())
+            Dock(onApps, onSettings)
         }
-        drawCircle(t.accent2, 6.dp.toPx(), Offset(size.width * f, y))
+    }
+}
+
+@Composable
+fun MapCard(modifier: Modifier = Modifier) {
+    NeonCard(modifier, tag = "MAPA Y UBICACIÓN") {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Vista de Mapa", color = LocalTheme.current.dim, fontFamily = Mono)
+        }
+    }
+}
+
+@Composable
+fun TimeWeatherCard(modifier: Modifier = Modifier) {
+    NeonCard(modifier, tag = "TIEMPO") {
+        var timeStr by remember { mutableStateOf("") }
+        LaunchedEffect(Unit) {
+            while (true) {
+                timeStr = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+                delay(1000)
+            }
+        }
+        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center) {
+            Text(timeStr, fontSize = 32.sp, fontFamily = Mono, fontWeight = FontWeight.Bold, color = LocalTheme.current.text)
+        }
+    }
+}
+
+@Composable
+fun MusicCard(modifier: Modifier = Modifier) {
+    val now by MediaHub.now.collectAsState()
+    NeonCard(modifier, tag = "AUDIO") {
+        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center) {
+            Text(if (now.title.isNotEmpty()) now.title else "Sin reproducción", color = LocalTheme.current.text, fontFamily = Mono, maxLines = 1)
+            Text(if (now.artist.isNotEmpty()) now.artist else "Toca para abrir música", color = LocalTheme.current.dim, fontSize = 12.sp, fontFamily = Mono, maxLines = 1)
+        }
+    }
+}
+
+@Composable
+fun GaugeCard(modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val speed by Store.speed.collectAsState()
+    val t = LocalTheme.current
+    NeonCard(modifier, tag = t.speedTag) {
+        Box(Modifier.fillMaxSize().clickable(onClick = onClick), contentAlignment = Alignment.Center) {
+            Text("${speed.roundToInt()} km/h", fontSize = 42.sp, fontFamily = Mono, fontWeight = FontWeight.Bold, color = t.accent)
+        }
+    }
+}
+
+@Composable
+fun Dock(onApps: () -> Unit, onSettings: (Int) -> Unit) {
+    val t = LocalTheme.current
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 56.dp).background(t.card, themeShape(t, small = true)).padding(8.dp),
+        horizontalArrangement = Arrangement.SpaceAround,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        CtlBtn(5, false, onApps)
+        CtlBtn(0, false, { onSettings(0) })
+    }
+}
+
+@Composable
+fun AppsScreen(onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    Box(Modifier.fillMaxSize().background(LocalTheme.current.bg), contentAlignment = Alignment.Center) {
+        NeonButton("Volver", Modifier.width(150.dp), onClick = onBack)
+    }
+}
+
+@Composable
+fun SettingsScreen(tab: Int, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    Box(Modifier.fillMaxSize().background(LocalTheme.current.bg), contentAlignment = Alignment.Center) {
+        NeonButton("Volver", Modifier.width(150.dp), onClick = onBack)
     }
 }
